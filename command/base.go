@@ -1,4 +1,4 @@
-// Package command implements the ws subcommands.
+// Package command implements the sallyport subcommands.
 package command
 
 import (

@@ -14,9 +14,9 @@ var Version string
 type VersionCommand struct{}
 
 func (*VersionCommand) Name() string     { return "version" }
-func (*VersionCommand) Synopsis() string { return "Print ws version" }
+func (*VersionCommand) Synopsis() string { return "Print sallyport version" }
 func (*VersionCommand) Usage() string {
-	return "version: Print ws version\n"
+	return "version: Print sallyport version\n"
 }
 
 func (*VersionCommand) SetFlags(f *flag.FlagSet) {}

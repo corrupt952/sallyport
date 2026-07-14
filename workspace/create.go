@@ -14,7 +14,7 @@ const configTemplate = `{
 }
 `
 
-// Create writes a ws.jsonc template into dir and nothing else; wiring other
+// Create writes a sallyport.jsonc template into dir and nothing else; wiring other
 // tools stays out of scope so the config file remains the whole contract.
 func Create(dir string) error {
 	path := filepath.Join(dir, ConfigFileName)

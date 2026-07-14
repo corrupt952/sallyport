@@ -9,37 +9,37 @@ import (
 	"strings"
 )
 
-// stateEnvKey carries the pre-workspace values of everything ws overwrote,
+// stateEnvKey carries the pre-workspace values of everything sallyport overwrote,
 // so leaving a workspace restores the shell instead of leaking values into it.
-const stateEnvKey = "__WS_STATE"
+const stateEnvKey = "__SALLYPORT_STATE"
 
 type state struct {
 	Root string `json:"root"`
-	// nil means the variable did not exist before ws touched it.
+	// nil means the variable did not exist before sallyport touched it.
 	Saved map[string]*string `json:"saved"`
 }
 
 // ZshHook returns the shim for .zshrc. All logic stays in the binary; the
-// shim only evals `ws export zsh` output. It must never propagate an error:
+// shim only evals `sallyport export zsh` output. It must never propagate an error:
 // zsh stops running subsequent chpwd hooks when one fails, which would break
 // unrelated plugins. SIGINT is masked around the eval so a Ctrl-C cannot stop
-// it halfway and leave the environment and __WS_STATE inconsistent.
+// it halfway and leave the environment and __SALLYPORT_STATE inconsistent.
 func ZshHook() (string, error) {
 	self, err := os.Executable()
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf(`_ws_hook() {
+	return fmt.Sprintf(`_sallyport_hook() {
   trap -- '' SIGINT
   eval "$("%s" export zsh)"
   trap - SIGINT
   return 0
 }
 typeset -ag chpwd_functions
-if (( ! ${chpwd_functions[(I)_ws_hook]} )); then
-  chpwd_functions=(_ws_hook $chpwd_functions)
+if (( ! ${chpwd_functions[(I)_sallyport_hook]} )); then
+  chpwd_functions=(_sallyport_hook $chpwd_functions)
 fi
-_ws_hook
+_sallyport_hook
 `, self), nil
 }
 
@@ -60,7 +60,7 @@ func BuildExportScript(pwd string) (string, error) {
 			// Stdout is eval'd by the shell, so the error goes to stderr and
 			// the transition is still recorded; failing here instead would
 			// re-trigger the error on every cd inside the workspace.
-			fmt.Fprintf(os.Stderr, "ws: ignoring broken %s in %s: %v\n", ConfigFileName, root, err)
+			fmt.Fprintf(os.Stderr, "sallyport: ignoring broken %s in %s: %v\n", ConfigFileName, root, err)
 			vars = nil
 		}
 	}
@@ -84,7 +84,7 @@ func BuildExportScript(pwd string) (string, error) {
 
 	newSaved := map[string]*string{}
 	for _, v := range vars {
-		// The recorded original must predate ws entirely; when switching
+		// The recorded original must predate sallyport entirely; when switching
 		// between workspaces the previous state already holds it.
 		if orig, hit := st.Saved[v.Key]; hit {
 			newSaved[v.Key] = orig
@@ -130,7 +130,7 @@ func loadState() state {
 // Corruption is not silently absorbed: the saved originals are gone, so the
 // user must know their pre-workspace environment can no longer be restored.
 func warnCorruptState() {
-	fmt.Fprintf(os.Stderr, "ws: %s is corrupted; the pre-workspace environment cannot be restored\n", stateEnvKey)
+	fmt.Fprintf(os.Stderr, "sallyport: %s is corrupted; the pre-workspace environment cannot be restored\n", stateEnvKey)
 }
 
 func encodeState(s state) (string, error) {

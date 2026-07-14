@@ -1,4 +1,4 @@
-// Package workspace implements ws.jsonc discovery and environment injection.
+// Package workspace implements sallyport.jsonc discovery and environment injection.
 package workspace
 
 import (
@@ -14,7 +14,7 @@ import (
 
 // ConfigFileName marks a directory as a workspace root; there is no central
 // registry and no fixed parent directory.
-const ConfigFileName = "ws.jsonc"
+const ConfigFileName = "sallyport.jsonc"
 
 type Config struct {
 	Env map[string]string `json:"env"`
@@ -29,9 +29,9 @@ type EnvVar struct {
 // so anything outside identifier syntax would be shell injection.
 var keyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
-// FindRoot returns the nearest ancestor of dir containing ws.jsonc, or "".
-// Only a regular file counts: a symlinked ws.jsonc inside an untrusted
-// checkout could point at an arbitrary file (a private key, say) and ws must
+// FindRoot returns the nearest ancestor of dir containing sallyport.jsonc, or "".
+// Only a regular file counts: a symlinked sallyport.jsonc inside an untrusted
+// checkout could point at an arbitrary file (a private key, say) and sallyport must
 // not follow it.
 func FindRoot(dir string) string {
 	d := filepath.Clean(dir)
@@ -71,7 +71,7 @@ func LoadConfig(path string) (Config, error) {
 }
 
 // WorkspaceVars returns the variables to apply for root, in deterministic
-// order. WORKSPACE_PATH is always present so prompts and `ws current` work
+// order. WORKSPACE_PATH is always present so prompts and `sallyport current` work
 // without any configuration, but an explicit env entry wins.
 func WorkspaceVars(root string) ([]EnvVar, error) {
 	cfg, err := LoadConfig(ConfigPath(root))

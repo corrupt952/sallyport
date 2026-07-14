@@ -154,7 +154,7 @@ func TestCreateRefusesOverwrite(t *testing.T) {
 	dir := t.TempDir()
 	writeConfig(t, dir, `{"env": {"KEEP": "me"}}`)
 	if err := Create(dir); err == nil {
-		t.Error("expected error when ws.jsonc already exists")
+		t.Error("expected error when sallyport.jsonc already exists")
 	}
 	cfg, err := LoadConfig(ConfigPath(dir))
 	if err != nil || cfg.Env["KEEP"] != "me" {

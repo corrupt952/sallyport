@@ -16,7 +16,7 @@ type HookCommand struct{}
 func (*HookCommand) Name() string     { return "hook" }
 func (*HookCommand) Synopsis() string { return "Print the shell hook" }
 func (*HookCommand) Usage() string {
-	return "hook zsh: Print the shell hook (add eval \"$(ws hook zsh)\" to .zshrc)\n"
+	return "hook zsh: Print the shell hook (add eval \"$(sallyport hook zsh)\" to .zshrc)\n"
 }
 
 func (*HookCommand) SetFlags(f *flag.FlagSet) {}
