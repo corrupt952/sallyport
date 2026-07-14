@@ -11,10 +11,25 @@ import (
 	"strings"
 )
 
-// stateEnvKey carries the pre-workspace values of everything sallyport overwrote,
-// so leaving a workspace restores the shell instead of leaking values into it.
+// stateEnvKey is the environment variable the binary reads its state from
+// (loadState). The shell never exports it: it keeps the encoded value in
+// stateShellVar, a non-exported global, and the hook passes it in as this
+// env var only for the single invocation that calls the binary. Nothing
+// else ever sees it, so it cannot leak into child processes.
 const stateEnvKey = "__SALLYPORT_STATE"
 
+// stateShellVar is the non-exported zsh global the hook stores the encoded
+// state in between invocations.
+const stateShellVar = "__sallyport_state"
+
+// state carries the pre-workspace values of everything sallyport overwrote,
+// so leaving a workspace restores the shell instead of leaking values into
+// it. Because it lives in a non-exported shell variable, a shell started
+// inside a workspace does not inherit its parent's state: that child's
+// first hook invocation sees no state and records the workspace-applied
+// environment it inherited as its own baseline. So each shell restores to
+// the environment it was born into, not necessarily the environment from
+// before sallyport ever ran.
 type state struct {
 	Root string `json:"root"`
 	// nil means the variable did not exist before sallyport touched it.
@@ -25,7 +40,15 @@ type state struct {
 // shim only evals `sallyport export zsh` output. It must never propagate an error:
 // zsh stops running subsequent chpwd hooks when one fails, which would break
 // unrelated plugins. SIGINT is masked around the eval so a Ctrl-C cannot stop
-// it halfway and leave the environment and __SALLYPORT_STATE inconsistent.
+// it halfway and leave the environment and stateShellVar inconsistent.
+//
+// stateShellVar is declared with `typeset -g` (non-exported) rather than
+// exported: an exported state would be inherited by every child process the
+// workspace starts, defeating the point of an isolated workspace. The hook
+// instead passes it to the binary as stateEnvKey for the duration of a
+// single invocation, using zsh's one-shot command-prefix assignment; that
+// assignment is process-local and never touches the shell's own
+// environment or its other children.
 //
 // The hook runs on precmd as well as chpwd so that trust/untrust and config
 // edits take effect on the next prompt without a directory change (the same
@@ -42,9 +65,10 @@ func ZshHook() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf(`_sallyport_hook() {
+	return fmt.Sprintf(`typeset -g %[1]s
+_sallyport_hook() {
   trap -- '' SIGINT
-  eval "$("%s" export "$@" zsh)"
+  eval "$(%[2]s="$%[1]s" "%[3]s" export "$@" zsh)"
   trap - SIGINT
   return 0
 }
@@ -58,7 +82,7 @@ fi
 if (( ! ${precmd_functions[(I)_sallyport_hook_precmd]} )); then
   precmd_functions=(_sallyport_hook_precmd $precmd_functions)
 fi
-`, self), nil
+`, stateShellVar, stateEnvKey, self), nil
 }
 
 // BuildExportScript emits the env diff for pwd; no change emits nothing.
@@ -142,13 +166,16 @@ func BuildExportScript(pwd string, quiet bool) (string, error) {
 	}
 
 	if root == "" {
-		fmt.Fprintf(&b, "unset %s\n", stateEnvKey)
+		fmt.Fprintf(&b, "unset %s\n", stateShellVar)
 	} else {
 		encoded, err := encodeState(state{Root: root, Saved: newSaved})
 		if err != nil {
 			return "", err
 		}
-		fmt.Fprintf(&b, "export %s=%s\n", stateEnvKey, zshQuote(encoded))
+		// typeset -g, not export: this eval runs inside _sallyport_hook, so a
+		// plain assignment would be scoped to the function. The state itself
+		// must stay non-exported (see stateShellVar).
+		fmt.Fprintf(&b, "typeset -g %s=%s\n", stateShellVar, zshQuote(encoded))
 	}
 	return b.String(), nil
 }

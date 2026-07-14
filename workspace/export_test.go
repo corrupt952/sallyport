@@ -41,7 +41,7 @@ func newUntrustedWorkspaceDir(t *testing.T, config string) string {
 func stateFromScript(t *testing.T, script string) state {
 	t.Helper()
 	for _, line := range strings.Split(script, "\n") {
-		raw, found := strings.CutPrefix(line, "export "+stateEnvKey+"='")
+		raw, found := strings.CutPrefix(line, "typeset -g "+stateShellVar+"='")
 		if !found {
 			continue
 		}
@@ -56,7 +56,7 @@ func stateFromScript(t *testing.T, script string) state {
 		}
 		return s
 	}
-	t.Fatalf("no %s in script:\n%s", stateEnvKey, script)
+	t.Fatalf("no %s in script:\n%s", stateShellVar, script)
 	return state{}
 }
 
@@ -133,7 +133,7 @@ func TestExportLeaveRestoresOriginals(t *testing.T) {
 	for _, want := range []string{
 		"export SSH_AUTH_SOCK='/original/agent.sock'",
 		"unset WORKSPACE_PATH",
-		"unset " + stateEnvKey,
+		"unset " + stateShellVar,
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("script missing %q:\n%s", want, script)
@@ -220,7 +220,7 @@ func TestExportSkipsUntrustedConfig(t *testing.T) {
 	// The previous workspace must still be rolled back.
 	for _, want := range []string{
 		"export SSH_AUTH_SOCK='/original/agent.sock'",
-		"unset " + stateEnvKey,
+		"unset " + stateShellVar,
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("script missing %q:\n%s", want, script)
@@ -257,7 +257,7 @@ func TestExportUntrustInPlaceRollsBack(t *testing.T) {
 	}
 	for _, want := range []string{
 		"export SSH_AUTH_SOCK='/original/agent.sock'",
-		"unset " + stateEnvKey,
+		"unset " + stateShellVar,
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("script missing %q:\n%s", want, script)
@@ -302,6 +302,25 @@ func TestZshHookRegistersWithoutApplying(t *testing.T) {
 		if strings.TrimSpace(line) == "_sallyport_hook" {
 			t.Fatalf("shim applies immediately:\n%s", script)
 		}
+	}
+}
+
+// The shim must keep the state non-exported and pass it to the binary only
+// as a one-shot, invocation-scoped env var: an exported state would be
+// inherited by every child process the workspace starts.
+func TestZshHookPassesStateAsOneShotEnvVar(t *testing.T) {
+	script, err := ZshHook()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(script, "typeset -g "+stateShellVar) {
+		t.Errorf("shim does not declare a non-exported state global:\n%s", script)
+	}
+	if !strings.Contains(script, stateEnvKey+`="$`+stateShellVar+`"`) {
+		t.Errorf("shim does not pass state as a one-shot env var to the binary invocation:\n%s", script)
+	}
+	if strings.Contains(script, "export "+stateEnvKey) {
+		t.Errorf("shim exports the state:\n%s", script)
 	}
 }
 
@@ -369,8 +388,34 @@ func TestExportCommitsStateLast(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimRight(script, "\n"), "\n")
-	if last := lines[len(lines)-1]; !strings.HasPrefix(last, "export "+stateEnvKey+"=") {
+	if last := lines[len(lines)-1]; !strings.HasPrefix(last, "typeset -g "+stateShellVar+"=") {
 		t.Errorf("state is not committed last: %q", last)
+	}
+}
+
+// Regression guard: state must never be re-exported. An exported
+// __SALLYPORT_STATE would be inherited by every child process the
+// workspace starts, defeating the isolation stateShellVar exists for.
+func TestExportNeverExportsState(t *testing.T) {
+	t.Setenv(stateEnvKey, "")
+	root := newWorkspaceDir(t, `{"env": {"SSH_AUTH_SOCK": "/1password/agent.sock"}}`)
+
+	enterScript, err := BuildExportScript(root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(enterScript, "export "+stateEnvKey) {
+		t.Errorf("state was exported on enter:\n%s", enterScript)
+	}
+
+	st := stateFromScript(t, enterScript)
+	setState(t, st)
+	leaveScript, err := BuildExportScript(t.TempDir(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(leaveScript, "export "+stateEnvKey) {
+		t.Errorf("state was exported on leave:\n%s", leaveScript)
 	}
 }
 
