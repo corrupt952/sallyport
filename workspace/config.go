@@ -49,8 +49,24 @@ func FindRoot(dir string) string {
 
 func ConfigPath(root string) string { return filepath.Join(root, ConfigFileName) }
 
+// maxConfigSize bounds the per-prompt hook cost: parsing scales linearly with
+// file size, so a runaway config must fail loudly instead of slowing every
+// prompt. Legitimate configs are a few hundred bytes.
+const maxConfigSize = 1 << 20
+
+func readConfigFile(path string) ([]byte, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if fi.Size() > maxConfigSize {
+		return nil, fmt.Errorf("%s: exceeds %d bytes", path, maxConfigSize)
+	}
+	return os.ReadFile(path)
+}
+
 func LoadConfig(path string) (Config, error) {
-	data, err := os.ReadFile(path)
+	data, err := readConfigFile(path)
 	if err != nil {
 		return Config{}, err
 	}

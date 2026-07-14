@@ -53,6 +53,18 @@ func TestLoadConfigRejectsNonStringValue(t *testing.T) {
 	}
 }
 
+func TestLoadConfigRejectsOversizedFile(t *testing.T) {
+	dir := t.TempDir()
+	huge := append(make([]byte, 0, maxConfigSize+64), `{"env": {}}`...)
+	huge = append(huge, make([]byte, maxConfigSize)...)
+	if err := os.WriteFile(filepath.Join(dir, ConfigFileName), huge, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(ConfigPath(dir)); err == nil {
+		t.Error("oversized config accepted, want error")
+	}
+}
+
 func TestLoadConfigRejectsBrokenSyntax(t *testing.T) {
 	dir := t.TempDir()
 	writeConfig(t, dir, `{env: broken`)

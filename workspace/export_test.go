@@ -282,6 +282,23 @@ func TestExportTrustInPlaceApplies(t *testing.T) {
 	}
 }
 
+// The state export must be the final line: if the emitting process dies
+// mid-write, the shell evals a script whose state was never committed, and
+// the next evaluation simply redoes the whole (idempotent) transition.
+func TestExportCommitsStateLast(t *testing.T) {
+	t.Setenv(stateEnvKey, "")
+	root := newWorkspaceDir(t, `{"env": {"SSH_AUTH_SOCK": "/1password/agent.sock"}}`)
+
+	script, err := BuildExportScript(root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(script, "\n"), "\n")
+	if last := lines[len(lines)-1]; !strings.HasPrefix(last, "export "+stateEnvKey+"=") {
+		t.Errorf("state is not committed last: %q", last)
+	}
+}
+
 func TestZshQuote(t *testing.T) {
 	cases := map[string]string{
 		"plain":        "'plain'",

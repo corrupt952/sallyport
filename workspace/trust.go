@@ -30,7 +30,7 @@ func fingerprint(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	content, err := os.ReadFile(abs)
+	content, err := readConfigFile(abs)
 	if err != nil {
 		return "", err
 	}
@@ -63,7 +63,7 @@ func LoadTrustedConfig(path string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	content, err := os.ReadFile(abs)
+	content, err := readConfigFile(abs)
 	if err != nil {
 		return Config{}, err
 	}
@@ -79,7 +79,7 @@ func Trust(path string) error {
 	if err != nil {
 		return err
 	}
-	content, err := os.ReadFile(abs)
+	content, err := readConfigFile(abs)
 	if err != nil {
 		return err
 	}
@@ -94,8 +94,15 @@ func Trust(path string) error {
 		return err
 	}
 	// The record's content is the config path, for humans inspecting the dir;
-	// lookups only ever use the filename.
-	if err := os.WriteFile(filepath.Join(trustDir(), fp), []byte(abs+"\n"), 0o600); err != nil {
+	// lookups only ever use the filename. Written via rename: lookups test
+	// mere existence, so a crash mid-write must not leave an empty record
+	// behind that would pass as a valid grant.
+	record := filepath.Join(trustDir(), fp)
+	tmp := record + ".tmp"
+	if err := os.WriteFile(tmp, []byte(abs+"\n"), 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, record); err != nil {
 		return err
 	}
 	Ok("trusted %s", abs)
