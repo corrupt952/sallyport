@@ -54,6 +54,10 @@ func LoadConfig(path string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	return parseConfig(path, data)
+}
+
+func parseConfig(path string, data []byte) (Config, error) {
 	std, err := hujson.Standardize(data)
 	if err != nil {
 		return Config{}, fmt.Errorf("%s: %w", path, err)
@@ -71,13 +75,9 @@ func LoadConfig(path string) (Config, error) {
 }
 
 // WorkspaceVars returns the variables to apply for root, in deterministic
-// order. WORKSPACE_PATH is always present so prompts and `sallyport current` work
-// without any configuration, but an explicit env entry wins.
-func WorkspaceVars(root string) ([]EnvVar, error) {
-	cfg, err := LoadConfig(ConfigPath(root))
-	if err != nil {
-		return nil, err
-	}
+// order. WORKSPACE_PATH is always present so prompt integrations work without
+// any configuration, but an explicit env entry wins.
+func WorkspaceVars(root string, cfg Config) []EnvVar {
 	var vars []EnvVar
 	if _, ok := cfg.Env["WORKSPACE_PATH"]; !ok {
 		vars = append(vars, EnvVar{Key: "WORKSPACE_PATH", Val: root})
@@ -90,5 +90,5 @@ func WorkspaceVars(root string) ([]EnvVar, error) {
 	for _, k := range keys {
 		vars = append(vars, EnvVar{Key: k, Val: cfg.Env[k]})
 	}
-	return vars, nil
+	return vars
 }

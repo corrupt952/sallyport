@@ -3,10 +3,14 @@ package workspace
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 )
+
+// ErrUntrusted marks a config that exists but has no valid trust grant.
+var ErrUntrusted = errors.New("config is not trusted")
 
 // Trust records approvals as sha256(config path + content), so any edit to an
 // approved config silently revokes the grant. Without this, cd-ing into a
@@ -30,11 +34,15 @@ func fingerprint(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return fingerprintBytes(abs, content), nil
+}
+
+func fingerprintBytes(abs string, content []byte) string {
 	h := sha256.New()
 	h.Write([]byte(abs))
 	h.Write([]byte{0})
 	h.Write(content)
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func IsTrusted(path string) bool {
@@ -44,6 +52,26 @@ func IsTrusted(path string) bool {
 	}
 	_, err = os.Stat(filepath.Join(trustDir(), fp))
 	return err == nil
+}
+
+// LoadTrustedConfig reads the config exactly once, verifies the trust grant
+// against those bytes, and parses the very same bytes. Verifying and parsing
+// on separate reads would leave a window where the approved content and the
+// applied content differ (TOCTOU).
+func LoadTrustedConfig(path string) (Config, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return Config{}, err
+	}
+	content, err := os.ReadFile(abs)
+	if err != nil {
+		return Config{}, err
+	}
+	fp := fingerprintBytes(abs, content)
+	if _, err := os.Stat(filepath.Join(trustDir(), fp)); err != nil {
+		return Config{}, ErrUntrusted
+	}
+	return parseConfig(abs, content)
 }
 
 func Trust(path string) error {

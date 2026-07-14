@@ -3,6 +3,7 @@ package workspace
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -52,23 +53,21 @@ func BuildExportScript(pwd string) (string, error) {
 		return "", nil
 	}
 
-	// An untrusted config is treated as if the workspace did not exist: the
-	// previous workspace still gets restored, but nothing is applied.
-	if root != "" && !IsTrusted(ConfigPath(root)) {
-		fmt.Fprintf(os.Stderr, "sallyport: %s is not trusted; run `sallyport trust` inside it\n", ConfigPath(root))
-		root = ""
-	}
-
 	var vars []EnvVar
 	if root != "" {
-		var err error
-		vars, err = WorkspaceVars(root)
-		if err != nil {
+		switch cfg, err := LoadTrustedConfig(ConfigPath(root)); {
+		case errors.Is(err, ErrUntrusted):
+			// Treated as if the workspace did not exist: the previous
+			// workspace still gets restored, but nothing is applied.
+			fmt.Fprintf(os.Stderr, "sallyport: %s is not trusted; run `sallyport trust` inside it\n", ConfigPath(root))
+			root = ""
+		case err != nil:
 			// Stdout is eval'd by the shell, so the error goes to stderr and
 			// the transition is still recorded; failing here instead would
 			// re-trigger the error on every cd inside the workspace.
 			fmt.Fprintf(os.Stderr, "sallyport: ignoring broken %s in %s: %v\n", ConfigFileName, root, err)
-			vars = nil
+		default:
+			vars = WorkspaceVars(root, cfg)
 		}
 	}
 

@@ -104,10 +104,11 @@ func TestWorkspaceVars(t *testing.T) {
 	dir := t.TempDir()
 	writeConfig(t, dir, `{"env": {"B_KEY": "b", "A_KEY": "a"}}`)
 
-	vars, err := WorkspaceVars(dir)
+	cfg, err := LoadConfig(ConfigPath(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
+	vars := WorkspaceVars(dir, cfg)
 	want := []EnvVar{
 		{Key: "WORKSPACE_PATH", Val: dir},
 		{Key: "A_KEY", Val: "a"},
@@ -127,10 +128,11 @@ func TestWorkspaceVarsExplicitWorkspacePathWins(t *testing.T) {
 	dir := t.TempDir()
 	writeConfig(t, dir, `{"env": {"WORKSPACE_PATH": "/custom"}}`)
 
-	vars, err := WorkspaceVars(dir)
+	cfg, err := LoadConfig(ConfigPath(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
+	vars := WorkspaceVars(dir, cfg)
 	if len(vars) != 1 || vars[0] != (EnvVar{Key: "WORKSPACE_PATH", Val: "/custom"}) {
 		t.Errorf("got %v, want single custom WORKSPACE_PATH", vars)
 	}
