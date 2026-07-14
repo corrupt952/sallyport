@@ -25,6 +25,11 @@ type state struct {
 // zsh stops running subsequent chpwd hooks when one fails, which would break
 // unrelated plugins. SIGINT is masked around the eval so a Ctrl-C cannot stop
 // it halfway and leave the environment and __SALLYPORT_STATE inconsistent.
+//
+// The hook runs on precmd as well as chpwd so that trust/untrust and config
+// edits take effect on the next prompt without a directory change (the same
+// reason direnv hooks both). The precmd variant passes -quiet: repeating the
+// "not trusted" warning on every empty Enter would drown the prompt.
 func ZshHook() (string, error) {
 	self, err := os.Executable()
 	if err != nil {
@@ -32,43 +37,59 @@ func ZshHook() (string, error) {
 	}
 	return fmt.Sprintf(`_sallyport_hook() {
   trap -- '' SIGINT
-  eval "$("%s" export zsh)"
+  eval "$("%s" export "$@" zsh)"
   trap - SIGINT
   return 0
 }
-typeset -ag chpwd_functions
+_sallyport_hook_precmd() {
+  _sallyport_hook -quiet
+}
+typeset -ag chpwd_functions precmd_functions
 if (( ! ${chpwd_functions[(I)_sallyport_hook]} )); then
   chpwd_functions=(_sallyport_hook $chpwd_functions)
+fi
+if (( ! ${precmd_functions[(I)_sallyport_hook_precmd]} )); then
+  precmd_functions=(_sallyport_hook_precmd $precmd_functions)
 fi
 _sallyport_hook
 `, self), nil
 }
 
-// BuildExportScript emits the env diff for pwd. Movement within one workspace
-// emits nothing, which keeps the per-cd cost of the hook near zero.
-func BuildExportScript(pwd string) (string, error) {
+// BuildExportScript emits the env diff for pwd; no change emits nothing.
+// quiet suppresses the untrusted warning for the per-prompt (precmd) calls.
+func BuildExportScript(pwd string, quiet bool) (string, error) {
 	st := loadState()
 	root := FindRoot(pwd)
-	if root == st.Root {
-		return "", nil
-	}
 
 	var vars []EnvVar
 	if root != "" {
 		switch cfg, err := LoadTrustedConfig(ConfigPath(root)); {
 		case errors.Is(err, ErrUntrusted):
 			// Treated as if the workspace did not exist: the previous
-			// workspace still gets restored, but nothing is applied.
-			fmt.Fprintf(os.Stderr, "sallyport: %s is not trusted; run `sallyport trust` inside it\n", ConfigPath(root))
+			// workspace still gets restored, but nothing is applied. The
+			// warning is forced through quiet when the grant was revoked
+			// while the workspace is applied — a silent rollback of the
+			// user's environment would be confusing.
+			if !quiet || root == st.Root {
+				fmt.Fprintf(os.Stderr, "sallyport: %s is not trusted; run `sallyport trust` inside it\n", ConfigPath(root))
+			}
 			root = ""
 		case err != nil:
 			// Stdout is eval'd by the shell, so the error goes to stderr and
 			// the transition is still recorded; failing here instead would
 			// re-trigger the error on every cd inside the workspace.
-			fmt.Fprintf(os.Stderr, "sallyport: ignoring broken %s in %s: %v\n", ConfigFileName, root, err)
+			if !quiet {
+				fmt.Fprintf(os.Stderr, "sallyport: ignoring broken %s in %s: %v\n", ConfigFileName, root, err)
+			}
 		default:
 			vars = WorkspaceVars(root, cfg)
 		}
+	}
+
+	// The comparison runs after trust filtering, not before: revocation and
+	// expiry must take effect on the next prompt even without a cd.
+	if root == st.Root {
+		return "", nil
 	}
 
 	var b strings.Builder

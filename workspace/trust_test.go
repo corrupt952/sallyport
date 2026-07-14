@@ -46,6 +46,15 @@ func TestTrustExpiresWhenContentChanges(t *testing.T) {
 	}
 }
 
+func TestTrustRejectsBrokenConfig(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	dir := t.TempDir()
+	writeConfig(t, dir, `{"env": {"$(whoami)": "x"}}`)
+	if err := Trust(ConfigPath(dir)); err == nil {
+		t.Fatal("expected error when trusting an unparseable config")
+	}
+}
+
 func TestUntrustWithoutGrant(t *testing.T) {
 	path := trustSetup(t)
 	if err := Untrust(path); err == nil {

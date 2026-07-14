@@ -75,16 +75,26 @@ func LoadTrustedConfig(path string) (Config, error) {
 }
 
 func Trust(path string) error {
-	fp, err := fingerprint(path)
+	abs, err := filepath.Abs(path)
 	if err != nil {
 		return err
+	}
+	content, err := os.ReadFile(abs)
+	if err != nil {
+		return err
+	}
+	// Fingerprint before parsing, the same order as LoadTrustedConfig.
+	fp := fingerprintBytes(abs, content)
+	// Approving bytes that cannot be parsed would create a grant the export
+	// path can never use, and would warn on every cd instead of failing here.
+	if _, err := parseConfig(abs, content); err != nil {
+		return fmt.Errorf("refusing to trust: %w", err)
 	}
 	if err := os.MkdirAll(trustDir(), 0o700); err != nil {
 		return err
 	}
 	// The record's content is the config path, for humans inspecting the dir;
 	// lookups only ever use the filename.
-	abs, _ := filepath.Abs(path)
 	if err := os.WriteFile(filepath.Join(trustDir(), fp), []byte(abs+"\n"), 0o600); err != nil {
 		return err
 	}

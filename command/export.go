@@ -11,15 +11,19 @@ import (
 	"github.com/corrupt952/sallyport/workspace"
 )
 
-type ExportCommand struct{}
+type ExportCommand struct {
+	quiet bool
+}
 
 func (*ExportCommand) Name() string     { return "export" }
 func (*ExportCommand) Synopsis() string { return "Print env diff for the current directory" }
 func (*ExportCommand) Usage() string {
-	return "export zsh: Print env diff for the current directory (used by the hook)\n"
+	return "export [-quiet] zsh: Print env diff for the current directory (used by the hook)\n"
 }
 
-func (*ExportCommand) SetFlags(f *flag.FlagSet) {}
+func (c *ExportCommand) SetFlags(f *flag.FlagSet) {
+	f.BoolVar(&c.quiet, "quiet", false, "suppress warnings (used by the per-prompt hook)")
+}
 
 func (c *ExportCommand) Execute(_ context.Context, f *flag.FlagSet, _ ...interface{}) subcommands.ExitStatus {
 	if f.NArg() != 1 || f.Arg(0) != "zsh" {
@@ -30,7 +34,7 @@ func (c *ExportCommand) Execute(_ context.Context, f *flag.FlagSet, _ ...interfa
 	if err != nil {
 		return fail(err)
 	}
-	script, err := workspace.BuildExportScript(pwd)
+	script, err := workspace.BuildExportScript(pwd, c.quiet)
 	if err != nil {
 		return fail(err)
 	}

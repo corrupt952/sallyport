@@ -58,6 +58,9 @@ func LoadConfig(path string) (Config, error) {
 }
 
 func parseConfig(path string, data []byte) (Config, error) {
+	// hujson.Standardize mutates its input buffer; callers fingerprint the
+	// original bytes, so parsing must not touch them.
+	data = append([]byte(nil), data...)
 	std, err := hujson.Standardize(data)
 	if err != nil {
 		return Config{}, fmt.Errorf("%s: %w", path, err)

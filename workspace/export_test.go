@@ -71,7 +71,7 @@ func TestExportEnterSavesOriginals(t *testing.T) {
 	os.Unsetenv("WORKSPACE_PATH")
 	root := newWorkspaceDir(t, `{"env": {"SSH_AUTH_SOCK": "/1password/agent.sock"}}`)
 
-	script, err := BuildExportScript(root)
+	script, err := BuildExportScript(root, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestExportNoopWithinSameWorkspace(t *testing.T) {
 	root := newWorkspaceDir(t, `{"env": {}}`)
 	setState(t, state{Root: root, Saved: map[string]*string{}})
 
-	script, err := BuildExportScript(filepath.Join(root, "repo", "sub"))
+	script, err := BuildExportScript(filepath.Join(root, "repo", "sub"), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestExportLeaveRestoresOriginals(t *testing.T) {
 		},
 	})
 
-	script, err := BuildExportScript(t.TempDir())
+	script, err := BuildExportScript(t.TempDir(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,7 @@ func TestExportSwitchKeepsPreWorkspaceOriginals(t *testing.T) {
 	rootA := newWorkspaceDir(t, `{"env": {"SSH_AUTH_SOCK": "/a/agent.sock"}}`)
 	rootB := newWorkspaceDir(t, `{"env": {"SSH_AUTH_SOCK": "/b/agent.sock"}}`)
 
-	enterA, err := BuildExportScript(rootA)
+	enterA, err := BuildExportScript(rootA, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +150,7 @@ func TestExportSwitchKeepsPreWorkspaceOriginals(t *testing.T) {
 	t.Setenv("SSH_AUTH_SOCK", "/a/agent.sock")
 	t.Setenv("WORKSPACE_PATH", rootA)
 
-	enterB, err := BuildExportScript(rootB)
+	enterB, err := BuildExportScript(rootB, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,9 +165,25 @@ func TestExportSwitchKeepsPreWorkspaceOriginals(t *testing.T) {
 
 func TestExportIgnoresBrokenConfig(t *testing.T) {
 	t.Setenv(stateEnvKey, "")
-	root := newWorkspaceDir(t, `{"env": {"$(whoami)": "x"}}`)
+	root := newUntrustedWorkspaceDir(t, `{"env": {"$(whoami)": "x"}}`)
+	// Trust refuses unparseable configs, so forge the grant directly to
+	// simulate bytes approved by an older version with different parse rules.
+	abs, err := filepath.Abs(ConfigPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(abs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(trustDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(trustDir(), fingerprintBytes(abs, content)), []byte(abs+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
-	script, err := BuildExportScript(root)
+	script, err := BuildExportScript(root, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +202,7 @@ func TestExportSkipsUntrustedConfig(t *testing.T) {
 	root := newUntrustedWorkspaceDir(t, `{"env": {"SSH_AUTH_SOCK": "/evil/agent.sock"}}`)
 	setState(t, state{Root: "/previous/demo", Saved: map[string]*string{"SSH_AUTH_SOCK": &orig}})
 
-	script, err := BuildExportScript(root)
+	script, err := BuildExportScript(root, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,12 +225,60 @@ func TestExportTrustExpiresOnEdit(t *testing.T) {
 	root := newWorkspaceDir(t, `{"env": {"OP_ACCOUNT": "good"}}`)
 	writeConfig(t, root, `{"env": {"OP_ACCOUNT": "tampered"}}`)
 
-	script, err := BuildExportScript(root)
+	script, err := BuildExportScript(root, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(script, "tampered") {
 		t.Errorf("edited config kept its trust grant:\n%s", script)
+	}
+}
+
+func TestExportUntrustInPlaceRollsBack(t *testing.T) {
+	orig := "/original/agent.sock"
+	root := newWorkspaceDir(t, `{"env": {"SSH_AUTH_SOCK": "/1password/agent.sock"}}`)
+	setState(t, state{Root: root, Saved: map[string]*string{"SSH_AUTH_SOCK": &orig}})
+
+	if err := Untrust(ConfigPath(root)); err != nil {
+		t.Fatal(err)
+	}
+	// Same pwd, no cd: revocation must roll the environment back anyway.
+	script, err := BuildExportScript(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"export SSH_AUTH_SOCK='/original/agent.sock'",
+		"unset " + stateEnvKey,
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("script missing %q:\n%s", want, script)
+		}
+	}
+}
+
+func TestExportTrustInPlaceApplies(t *testing.T) {
+	t.Setenv(stateEnvKey, "")
+	root := newUntrustedWorkspaceDir(t, `{"env": {"OP_ACCOUNT": "late.example.com"}}`)
+
+	script, err := BuildExportScript(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(script, "late.example.com") {
+		t.Fatalf("applied before trust:\n%s", script)
+	}
+
+	if err := Trust(ConfigPath(root)); err != nil {
+		t.Fatal(err)
+	}
+	// Same pwd, no cd: the very next evaluation must apply the workspace.
+	script, err = BuildExportScript(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(script, "export OP_ACCOUNT='late.example.com'") {
+		t.Errorf("trust did not take effect without a cd:\n%s", script)
 	}
 }
 
