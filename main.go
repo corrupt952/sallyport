@@ -12,9 +12,10 @@ import (
 
 func main() {
 	subcommands.Register(&command.CreateCommand{}, "")
-	subcommands.Register(&command.CurrentCommand{}, "")
 	subcommands.Register(&command.HookCommand{}, "")
 	subcommands.Register(&command.ExportCommand{}, "")
+	subcommands.Register(&command.TrustCommand{}, "")
+	subcommands.Register(&command.UntrustCommand{}, "")
 	subcommands.Register(&command.VersionCommand{}, "")
 	subcommands.Register(subcommands.HelpCommand(), "")
 	subcommands.Register(subcommands.CommandsCommand(), "")
