@@ -31,6 +31,12 @@ type state struct {
 // edits take effect on the next prompt without a directory change (the same
 // reason direnv hooks both). The precmd variant passes -quiet: repeating the
 // "not trusted" warning on every empty Enter would drown the prompt.
+//
+// The shim only registers and never applies immediately: applying while
+// .zshrc is still being sourced lets later export lines clobber workspace
+// values (frozen in by the fast path), and records pre-.zshrc values as the
+// originals to restore. Deferring to the first precmd, as direnv does, makes
+// the .zshrc order irrelevant.
 func ZshHook() (string, error) {
 	self, err := os.Executable()
 	if err != nil {
@@ -52,7 +58,6 @@ fi
 if (( ! ${precmd_functions[(I)_sallyport_hook_precmd]} )); then
   precmd_functions=(_sallyport_hook_precmd $precmd_functions)
 fi
-_sallyport_hook
 `, self), nil
 }
 

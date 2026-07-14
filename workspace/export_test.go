@@ -290,6 +290,21 @@ func TestExportTrustInPlaceApplies(t *testing.T) {
 	}
 }
 
+// The shim must not invoke the hook while .zshrc is still being sourced:
+// later export lines would clobber applied values and be recorded as the
+// values to restore. Application belongs to the first precmd.
+func TestZshHookRegistersWithoutApplying(t *testing.T) {
+	script, err := ZshHook()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(script, "\n") {
+		if strings.TrimSpace(line) == "_sallyport_hook" {
+			t.Fatalf("shim applies immediately:\n%s", script)
+		}
+	}
+}
+
 // Entering through a path alias must resolve to the same identity as the
 // canonical path: no re-trust prompt, no enter/leave churn between aliases.
 func TestExportSymlinkedPwdMatchesCanonical(t *testing.T) {
