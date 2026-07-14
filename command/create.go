@@ -14,9 +14,9 @@ import (
 type CreateCommand struct{}
 
 func (*CreateCommand) Name() string     { return "create" }
-func (*CreateCommand) Synopsis() string { return "Create a sallyport.jsonc in the current directory" }
+func (*CreateCommand) Synopsis() string { return "Create a .sallyport.jsonc in the current directory" }
 func (*CreateCommand) Usage() string {
-	return "create: Create a sallyport.jsonc in the current directory\n"
+	return "create: Create a .sallyport.jsonc in the current directory\n"
 }
 
 func (*CreateCommand) SetFlags(f *flag.FlagSet) {}

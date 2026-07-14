@@ -104,5 +104,5 @@ zsdoc/data
 
 # Sallyport
 /sallyport
-sallyport.jsonc
+.sallyport.jsonc
 .claude/

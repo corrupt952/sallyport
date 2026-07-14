@@ -14,9 +14,9 @@ import (
 type TrustCommand struct{}
 
 func (*TrustCommand) Name() string     { return "trust" }
-func (*TrustCommand) Synopsis() string { return "Approve the nearest sallyport.jsonc" }
+func (*TrustCommand) Synopsis() string { return "Approve the nearest .sallyport.jsonc" }
 func (*TrustCommand) Usage() string {
-	return "trust: Approve the nearest sallyport.jsonc so its env gets applied\n"
+	return "trust: Approve the nearest .sallyport.jsonc so its env gets applied\n"
 }
 
 func (*TrustCommand) SetFlags(f *flag.FlagSet) {}
