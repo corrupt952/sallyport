@@ -25,5 +25,7 @@ func Create(dir string) error {
 		return err
 	}
 	Ok("created %s", path)
-	return nil
+	// The user authored this file a moment ago; asking them to approve their
+	// own template would be pure ceremony.
+	return Trust(path)
 }

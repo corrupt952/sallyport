@@ -52,6 +52,13 @@ func BuildExportScript(pwd string) (string, error) {
 		return "", nil
 	}
 
+	// An untrusted config is treated as if the workspace did not exist: the
+	// previous workspace still gets restored, but nothing is applied.
+	if root != "" && !IsTrusted(ConfigPath(root)) {
+		fmt.Fprintf(os.Stderr, "sallyport: %s is not trusted; run `sallyport trust` inside it\n", ConfigPath(root))
+		root = ""
+	}
+
 	var vars []EnvVar
 	if root != "" {
 		var err error

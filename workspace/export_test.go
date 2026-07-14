@@ -11,6 +11,20 @@ import (
 
 func newWorkspaceDir(t *testing.T, config string) string {
 	t.Helper()
+	root := newUntrustedWorkspaceDir(t, config)
+	if err := Trust(ConfigPath(root)); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func newUntrustedWorkspaceDir(t *testing.T, config string) string {
+	t.Helper()
+	// Isolate the trust store, but only once per test: rotating it on every
+	// call would drop grants of workspaces created earlier in the same test.
+	if cur := os.Getenv("XDG_DATA_HOME"); cur == "" || !strings.HasPrefix(cur, os.TempDir()) {
+		t.Setenv("XDG_DATA_HOME", t.TempDir())
+	}
 	root := filepath.Join(t.TempDir(), "demo")
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatal(err)
@@ -164,6 +178,43 @@ func TestExportIgnoresBrokenConfig(t *testing.T) {
 	// re-warn) on every cd inside the workspace.
 	if st := stateFromScript(t, script); st.Root != root {
 		t.Errorf("state root = %q, want %q", st.Root, root)
+	}
+}
+
+func TestExportSkipsUntrustedConfig(t *testing.T) {
+	orig := "/original/agent.sock"
+	root := newUntrustedWorkspaceDir(t, `{"env": {"SSH_AUTH_SOCK": "/evil/agent.sock"}}`)
+	setState(t, state{Root: "/previous/demo", Saved: map[string]*string{"SSH_AUTH_SOCK": &orig}})
+
+	script, err := BuildExportScript(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(script, "evil") {
+		t.Errorf("untrusted config was applied:\n%s", script)
+	}
+	// The previous workspace must still be rolled back.
+	for _, want := range []string{
+		"export SSH_AUTH_SOCK='/original/agent.sock'",
+		"unset " + stateEnvKey,
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("script missing %q:\n%s", want, script)
+		}
+	}
+}
+
+func TestExportTrustExpiresOnEdit(t *testing.T) {
+	t.Setenv(stateEnvKey, "")
+	root := newWorkspaceDir(t, `{"env": {"OP_ACCOUNT": "good"}}`)
+	writeConfig(t, root, `{"env": {"OP_ACCOUNT": "tampered"}}`)
+
+	script, err := BuildExportScript(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(script, "tampered") {
+		t.Errorf("edited config kept its trust grant:\n%s", script)
 	}
 }
 

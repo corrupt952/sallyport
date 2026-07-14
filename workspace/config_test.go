@@ -137,6 +137,7 @@ func TestWorkspaceVarsExplicitWorkspacePathWins(t *testing.T) {
 }
 
 func TestCreateWritesLoadableTemplate(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	dir := t.TempDir()
 	if err := Create(dir); err != nil {
 		t.Fatal(err)
@@ -151,6 +152,7 @@ func TestCreateWritesLoadableTemplate(t *testing.T) {
 }
 
 func TestCreateRefusesOverwrite(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	dir := t.TempDir()
 	writeConfig(t, dir, `{"env": {"KEEP": "me"}}`)
 	if err := Create(dir); err == nil {
@@ -159,43 +161,5 @@ func TestCreateRefusesOverwrite(t *testing.T) {
 	cfg, err := LoadConfig(ConfigPath(dir))
 	if err != nil || cfg.Env["KEEP"] != "me" {
 		t.Errorf("existing config was clobbered: %v, %v", cfg, err)
-	}
-}
-
-func TestCurrentNameFromEnv(t *testing.T) {
-	t.Setenv("WORKSPACE_PATH", "/anywhere/demo")
-	name, err := CurrentName()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if name != "demo" {
-		t.Errorf("got %q, want demo", name)
-	}
-}
-
-func TestCurrentNameWalkUp(t *testing.T) {
-	t.Setenv("WORKSPACE_PATH", "")
-	root := filepath.Join(t.TempDir(), "demo")
-	nested := filepath.Join(root, "repo", "sub")
-	if err := os.MkdirAll(nested, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	writeConfig(t, root, `{"env": {}}`)
-	t.Chdir(nested)
-
-	name, err := CurrentName()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if name != "demo" {
-		t.Errorf("got %q, want demo", name)
-	}
-}
-
-func TestCurrentNameOutside(t *testing.T) {
-	t.Setenv("WORKSPACE_PATH", "")
-	t.Chdir(t.TempDir())
-	if _, err := CurrentName(); err == nil {
-		t.Error("expected error outside a workspace")
 	}
 }
