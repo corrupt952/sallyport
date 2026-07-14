@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -78,6 +79,56 @@ func TestLoadTrustedConfig(t *testing.T) {
 	writeConfig(t, filepath.Dir(path), `{"env": {"ADDED": "later"}}`)
 	if _, err := LoadTrustedConfig(path); !errors.Is(err, ErrUntrusted) {
 		t.Fatalf("edited config: got %v, want ErrUntrusted", err)
+	}
+}
+
+func TestTrustViaAliasPath(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	real := t.TempDir()
+	writeConfig(t, real, `{"env": {}}`)
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Trust(ConfigPath(link)); err != nil {
+		t.Fatal(err)
+	}
+	if !IsTrusted(ConfigPath(real)) {
+		t.Error("grant via alias does not cover the canonical path")
+	}
+	if !IsTrusted(ConfigPath(link)) {
+		t.Error("grant via alias does not cover the alias itself")
+	}
+}
+
+func TestPruneRemovesStaleRecords(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	kept := t.TempDir()
+	writeConfig(t, kept, `{"env": {}}`)
+	gone := t.TempDir()
+	writeConfig(t, gone, `{"env": {}}`)
+	for _, p := range []string{ConfigPath(kept), ConfigPath(gone)} {
+		if err := Trust(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Remove(ConfigPath(gone)); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Prune(); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(trustDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("got %d records after prune, want 1", len(entries))
+	}
+	if !IsTrusted(ConfigPath(kept)) {
+		t.Error("prune removed a grant whose config still exists")
 	}
 }
 

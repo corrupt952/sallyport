@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // ErrUntrusted marks a config that exists but has no valid trust grant.
@@ -25,8 +26,22 @@ func trustDir() string {
 	return filepath.Join(base, "sallyport", "trust")
 }
 
-func fingerprint(path string) (string, error) {
+// canonical resolves path aliases (macOS /tmp -> /private/tmp, symlinked
+// checkouts) to one identity: a grant or state recorded through one alias
+// must match accesses through any other.
+func canonical(path string) (string, error) {
 	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved, nil
+	}
+	return abs, nil
+}
+
+func fingerprint(path string) (string, error) {
+	abs, err := canonical(path)
 	if err != nil {
 		return "", err
 	}
@@ -59,7 +74,7 @@ func IsTrusted(path string) bool {
 // on separate reads would leave a window where the approved content and the
 // applied content differ (TOCTOU).
 func LoadTrustedConfig(path string) (Config, error) {
-	abs, err := filepath.Abs(path)
+	abs, err := canonical(path)
 	if err != nil {
 		return Config{}, err
 	}
@@ -75,7 +90,7 @@ func LoadTrustedConfig(path string) (Config, error) {
 }
 
 func Trust(path string) error {
-	abs, err := filepath.Abs(path)
+	abs, err := canonical(path)
 	if err != nil {
 		return err
 	}
@@ -122,5 +137,53 @@ func Untrust(path string) error {
 		return err
 	}
 	Ok("untrusted %s", path)
+	return nil
+}
+
+// Prune removes grants whose recorded config file no longer exists, plus
+// leftovers of interrupted writes. Grants for edited configs are kept on
+// purpose: restoring the original bytes legitimately revives them.
+func Prune() error {
+	entries, err := os.ReadDir(trustDir())
+	if os.IsNotExist(err) {
+		Info("nothing to prune")
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	removed := 0
+	for _, e := range entries {
+		record := filepath.Join(trustDir(), e.Name())
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			if err := os.Remove(record); err != nil {
+				return err
+			}
+			removed++
+			continue
+		}
+		data, err := os.ReadFile(record)
+		if err != nil {
+			continue
+		}
+		path := strings.TrimSpace(string(data))
+		if path == "" {
+			// Only an interrupted write by an older version leaves an empty
+			// record; it can never be matched intentionally.
+			if err := os.Remove(record); err != nil {
+				return err
+			}
+			removed++
+			continue
+		}
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			if err := os.Remove(record); err != nil {
+				return err
+			}
+			removed++
+			Ok("removed grant for missing %s", path)
+		}
+	}
+	Info("pruned %d record(s)", removed)
 	return nil
 }

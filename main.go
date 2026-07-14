@@ -16,6 +16,7 @@ func main() {
 	subcommands.Register(&command.ExportCommand{}, "")
 	subcommands.Register(&command.TrustCommand{}, "")
 	subcommands.Register(&command.UntrustCommand{}, "")
+	subcommands.Register(&command.PruneCommand{}, "")
 	subcommands.Register(&command.VersionCommand{}, "")
 	subcommands.Register(subcommands.HelpCommand(), "")
 	subcommands.Register(subcommands.CommandsCommand(), "")

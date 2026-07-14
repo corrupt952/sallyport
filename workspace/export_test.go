@@ -29,6 +29,11 @@ func newUntrustedWorkspaceDir(t *testing.T, config string) string {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// State roots are canonical, and macOS puts TMPDIR behind a symlink
+	// (/var -> /private/var), so expected values must be canonical too.
+	if c, err := filepath.EvalSymlinks(root); err == nil {
+		root = c
+	}
 	writeConfig(t, root, config)
 	return root
 }
@@ -99,6 +104,9 @@ func TestExportNoopWithinSameWorkspace(t *testing.T) {
 	root := newWorkspaceDir(t, `{"env": {}}`)
 	setState(t, state{Root: root, Saved: map[string]*string{}})
 
+	if err := os.MkdirAll(filepath.Join(root, "repo", "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	script, err := BuildExportScript(filepath.Join(root, "repo", "sub"), false)
 	if err != nil {
 		t.Fatal(err)
@@ -279,6 +287,58 @@ func TestExportTrustInPlaceApplies(t *testing.T) {
 	}
 	if !strings.Contains(script, "export OP_ACCOUNT='late.example.com'") {
 		t.Errorf("trust did not take effect without a cd:\n%s", script)
+	}
+}
+
+// Entering through a path alias must resolve to the same identity as the
+// canonical path: no re-trust prompt, no enter/leave churn between aliases.
+func TestExportSymlinkedPwdMatchesCanonical(t *testing.T) {
+	t.Setenv(stateEnvKey, "")
+	root := newWorkspaceDir(t, `{"env": {"OP_ACCOUNT": "alias.example.com"}}`)
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(root, link); err != nil {
+		t.Fatal(err)
+	}
+
+	script, err := BuildExportScript(link, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(script, "export OP_ACCOUNT='alias.example.com'") {
+		t.Fatalf("symlinked entry did not apply:\n%s", script)
+	}
+	st := stateFromScript(t, script)
+	if st.Root != root {
+		t.Errorf("state root = %q, want canonical %q", st.Root, root)
+	}
+
+	// Moving to the canonical path afterwards must be a no-op.
+	setState(t, st)
+	script, err = BuildExportScript(root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if script != "" {
+		t.Errorf("alias switch caused churn:\n%s", script)
+	}
+}
+
+func TestFindDirenvFile(t *testing.T) {
+	base := t.TempDir()
+	child := filepath.Join(base, "ws", "repo")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	envrc := filepath.Join(base, ".envrc")
+	if err := os.WriteFile(envrc, []byte("export A=1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := findDirenvFile(child); got != envrc {
+		t.Errorf("findDirenvFile = %q, want %q", got, envrc)
+	}
+	if got := findDirenvFile(t.TempDir()); got != "" {
+		t.Errorf("findDirenvFile without .envrc = %q, want empty", got)
 	}
 }
 

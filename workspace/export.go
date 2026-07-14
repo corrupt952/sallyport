@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -59,6 +60,11 @@ _sallyport_hook
 // quiet suppresses the untrusted warning for the per-prompt (precmd) calls.
 func BuildExportScript(pwd string, quiet bool) (string, error) {
 	st := loadState()
+	// zsh exports the logical $PWD, so entering through a symlink would
+	// otherwise record a state root that never matches the canonical one.
+	if c, err := canonical(pwd); err == nil {
+		pwd = c
+	}
 	root := FindRoot(pwd)
 
 	var vars []EnvVar
@@ -83,6 +89,12 @@ func BuildExportScript(pwd string, quiet bool) (string, error) {
 			}
 		default:
 			vars = WorkspaceVars(root, cfg)
+			// direnv and sallyport are unaware of each other and would fight
+			// over shared variables non-deterministically; make coexistence
+			// visible instead of mysterious.
+			if envrc := findDirenvFile(root); envrc != "" && !quiet {
+				fmt.Fprintf(os.Stderr, "sallyport: %s is also managed by direnv (%s); shared variables will conflict\n", root, envrc)
+			}
 		}
 	}
 
@@ -134,6 +146,22 @@ func BuildExportScript(pwd string, quiet bool) (string, error) {
 		fmt.Fprintf(&b, "export %s=%s\n", stateEnvKey, zshQuote(encoded))
 	}
 	return b.String(), nil
+}
+
+// findDirenvFile returns the nearest .envrc at root or above, or "".
+func findDirenvFile(dir string) string {
+	d := filepath.Clean(dir)
+	for {
+		p := filepath.Join(d, ".envrc")
+		if _, err := os.Lstat(p); err == nil {
+			return p
+		}
+		parent := filepath.Dir(d)
+		if parent == d {
+			return ""
+		}
+		d = parent
+	}
 }
 
 func loadState() state {
