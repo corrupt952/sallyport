@@ -127,19 +127,46 @@ func Trust(path string) error {
 	return nil
 }
 
+// Untrust matches records by their recorded config path, not by a fingerprint
+// of the current content. A grant is keyed by sha256(path + content), so once
+// the config is edited the current fingerprint no longer names any record and
+// the stale grant for the original bytes would survive on disk, silently
+// reviving trust the moment the content is restored. Removing every record
+// whose recorded path is the target's canonical path revokes all of them,
+// including the one for the content presently on disk.
 func Untrust(path string) error {
-	fp, err := fingerprint(path)
+	target, err := canonical(path)
 	if err != nil {
 		return err
 	}
-	record := filepath.Join(trustDir(), fp)
-	if _, err := os.Stat(record); err != nil {
+	entries, err := os.ReadDir(trustDir())
+	if err != nil {
 		return fmt.Errorf("not trusted: %s", path)
 	}
-	if err := os.Remove(record); err != nil {
-		return err
+	removed := 0
+	for _, e := range entries {
+		// .tmp leftovers are interrupted writes, not grants; empty records
+		// carry no path to match against.
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			continue
+		}
+		record := filepath.Join(trustDir(), e.Name())
+		data, err := os.ReadFile(record)
+		if err != nil {
+			continue
+		}
+		if strings.TrimSpace(string(data)) != target {
+			continue
+		}
+		if err := os.Remove(record); err != nil {
+			return err
+		}
+		removed++
 	}
-	Ok("untrusted %s", path)
+	if removed == 0 {
+		return fmt.Errorf("not trusted: %s", path)
+	}
+	Ok("untrusted %s", target)
 	return nil
 }
 
@@ -179,7 +206,14 @@ func Prune() error {
 			removed++
 			continue
 		}
-		if _, err := os.Stat(path); os.IsNotExist(err) {
+		if _, err := os.Stat(path); err != nil {
+			if !os.IsNotExist(err) {
+				// A permission or I/O error is not proof the config is gone;
+				// removing the grant on a guess would revoke a still-valid one.
+				// Surface it and keep the record so the user can act.
+				Warn("cannot stat %s, keeping grant: %v", path, err)
+				continue
+			}
 			if err := os.Remove(record); err != nil {
 				return err
 			}

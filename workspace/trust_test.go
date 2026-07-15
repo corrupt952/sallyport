@@ -104,6 +104,59 @@ func TestTrustViaAliasPath(t *testing.T) {
 	}
 }
 
+func TestUntrustAfterEditRemovesStaleGrant(t *testing.T) {
+	path := trustSetup(t)
+	original := `{"env": {}}`
+
+	if err := Trust(path); err != nil {
+		t.Fatal(err)
+	}
+	// Editing the config leaves the grant for the original bytes on disk while
+	// changing the current fingerprint; Untrust must still find and remove it.
+	writeConfig(t, filepath.Dir(path), `{"env": {"ADDED": "later"}}`)
+	if err := Untrust(path); err != nil {
+		t.Fatalf("untrust after edit failed: %v", err)
+	}
+
+	// Restoring the original content must not revive trust: the stale grant is
+	// gone, so this is the regression that motivated matching records by path.
+	writeConfig(t, filepath.Dir(path), original)
+	if IsTrusted(path) {
+		t.Fatal("trust revived after restoring content of an untrusted config")
+	}
+}
+
+func TestPruneRemovesTmpAndEmptyRecords(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	dir := t.TempDir()
+	writeConfig(t, dir, `{"env": {}}`)
+	if err := Trust(ConfigPath(dir)); err != nil {
+		t.Fatal(err)
+	}
+	// A crashed write of an older version can leave a .tmp leftover and an
+	// empty record; both must be pruned while the real grant survives.
+	if err := os.WriteFile(filepath.Join(trustDir(), "leftover.tmp"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(trustDir(), "empty"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Prune(); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(trustDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("got %d records after prune, want 1", len(entries))
+	}
+	if !IsTrusted(ConfigPath(dir)) {
+		t.Error("prune removed a grant whose config still exists")
+	}
+}
+
 func TestPruneRemovesStaleRecords(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	kept := t.TempDir()
