@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS is the primary target; Linux keeps the unix-generic paths
+        # (permission checks, zsh shim) honest.
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # The real-zsh regression tests skip silently when zsh is missing;
+      # install it so CI actually exercises the shim. macOS ships zsh.
+      - name: Install zsh
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zsh
+
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+
+      - name: go vet
+        run: go vet ./...
+
+      # -count=1 defeats the test cache; the zsh integration tests depend on
+      # the environment, not only the source.
+      - name: go test
+        run: go test -race -count=1 ./...
