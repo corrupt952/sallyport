@@ -9,6 +9,7 @@ import (
 const configTemplate = `{
   // Environment variables applied while inside this workspace.
   // WORKSPACE_PATH is exported automatically.
+  // Set "expand": true to let zsh expand $VAR etc. in values.
   "env": {
   },
 }

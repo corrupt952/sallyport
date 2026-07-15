@@ -58,10 +58,10 @@ func TestLoadConfigRejectsNonStringValue(t *testing.T) {
 	}
 }
 
-func TestLoadConfigRejectsUnquotableValue(t *testing.T) {
-	// A value that cannot be emitted as a zsh double-quoted body would break the
-	// generated `export KEY="..."` line and fail the whole eval (state commit
-	// included); parseConfig must reject it up front.
+func TestLoadConfigExpandRejectsUnquotableValue(t *testing.T) {
+	// In expand mode the value is emitted verbatim inside `export KEY="..."`,
+	// so content that cannot be a double-quoted body would break the line and
+	// fail the whole eval (state commit included); parseConfig must reject it.
 	cases := map[string]string{
 		"unescaped double quote": `a"b`,
 		"trailing backslash":     `abc\`,
@@ -69,24 +69,42 @@ func TestLoadConfigRejectsUnquotableValue(t *testing.T) {
 	}
 	for name, val := range cases {
 		dir := t.TempDir()
-		writeConfig(t, dir, `{"env": {"FOO": `+quoteJSON(val)+`}}`)
+		writeConfig(t, dir, `{"expand": true, "env": {"FOO": `+quoteJSON(val)+`}}`)
 		if _, err := LoadConfig(ConfigPath(dir)); err == nil {
-			t.Errorf("%s: value %q accepted, want error", name, val)
+			t.Errorf("%s: value %q accepted under expand, want error", name, val)
 		}
 	}
 }
 
-func TestLoadConfigAcceptsEscapedValue(t *testing.T) {
+func TestLoadConfigExpandAcceptsEscapedValue(t *testing.T) {
 	// Properly escaped sequences are legal double-quoted source text and must
-	// pass: a `\"` is a literal quote, a `\\` a literal backslash.
+	// pass even in expand mode: a `\"` is a literal quote, a `\\` a backslash.
 	dir := t.TempDir()
-	writeConfig(t, dir, `{"env": {"FOO": `+quoteJSON(`a\"b\\c`)+`}}`)
+	writeConfig(t, dir, `{"expand": true, "env": {"FOO": `+quoteJSON(`a\"b\\c`)+`}}`)
 	cfg, err := LoadConfig(ConfigPath(dir))
 	if err != nil {
 		t.Fatalf("escaped value rejected: %v", err)
 	}
 	if cfg.Env["FOO"] != `a\"b\\c` {
 		t.Errorf("FOO = %q", cfg.Env["FOO"])
+	}
+}
+
+func TestLoadConfigStrictModeAcceptsAnyValue(t *testing.T) {
+	// Strict mode (the default) single-quotes values, so content that would be
+	// illegal inside double quotes is carried safely and must be accepted; the
+	// double-quote validation applies only in expand mode.
+	for _, val := range []string{`a"b`, `abc\`, `\`, `$(whoami)`} {
+		dir := t.TempDir()
+		writeConfig(t, dir, `{"env": {"FOO": `+quoteJSON(val)+`}}`)
+		cfg, err := LoadConfig(ConfigPath(dir))
+		if err != nil {
+			t.Errorf("strict mode rejected %q: %v", val, err)
+			continue
+		}
+		if cfg.Env["FOO"] != val {
+			t.Errorf("FOO = %q, want %q", cfg.Env["FOO"], val)
+		}
 	}
 }
 
@@ -158,10 +176,36 @@ func TestWorkspaceVars(t *testing.T) {
 		t.Fatal(err)
 	}
 	vars := WorkspaceVars(dir, cfg)
+	// Strict mode is the default, so config values are literal (single-quoted).
 	want := []EnvVar{
 		{Key: "WORKSPACE_PATH", Val: dir, Literal: true},
-		{Key: "A_KEY", Val: "a"},
-		{Key: "B_KEY", Val: "b"},
+		{Key: "A_KEY", Val: "a", Literal: true},
+		{Key: "B_KEY", Val: "b", Literal: true},
+	}
+	if len(vars) != len(want) {
+		t.Fatalf("got %v, want %v", vars, want)
+	}
+	for i := range want {
+		if vars[i] != want[i] {
+			t.Errorf("vars[%d] = %v, want %v", i, vars[i], want[i])
+		}
+	}
+}
+
+func TestWorkspaceVarsExpandMakesValuesNonLiteral(t *testing.T) {
+	dir := t.TempDir()
+	writeConfig(t, dir, `{"expand": true, "env": {"A_KEY": "a"}}`)
+
+	cfg, err := LoadConfig(ConfigPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	vars := WorkspaceVars(dir, cfg)
+	// Expand mode double-quotes config values; the automatic WORKSPACE_PATH
+	// stays literal regardless.
+	want := []EnvVar{
+		{Key: "WORKSPACE_PATH", Val: dir, Literal: true},
+		{Key: "A_KEY", Val: "a", Literal: false},
 	}
 	if len(vars) != len(want) {
 		t.Fatalf("got %v, want %v", vars, want)
@@ -182,7 +226,8 @@ func TestWorkspaceVarsExplicitWorkspacePathWins(t *testing.T) {
 		t.Fatal(err)
 	}
 	vars := WorkspaceVars(dir, cfg)
-	if len(vars) != 1 || vars[0] != (EnvVar{Key: "WORKSPACE_PATH", Val: "/custom"}) {
+	// Strict mode: the explicit value is literal like any other.
+	if len(vars) != 1 || vars[0] != (EnvVar{Key: "WORKSPACE_PATH", Val: "/custom", Literal: true}) {
 		t.Errorf("got %v, want single custom WORKSPACE_PATH", vars)
 	}
 }

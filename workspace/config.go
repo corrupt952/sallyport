@@ -17,19 +17,26 @@ import (
 const ConfigFileName = ".sallyport.jsonc"
 
 type Config struct {
-	Env map[string]string `json:"env"`
+	// Expand opts a config into shell expansion of its env values. Default
+	// false is strict mode: values are single-quoted and applied verbatim,
+	// which safely carries any content. With "expand": true the values become
+	// zsh double-quoted source text so $VAR, $(...) and escapes are handled by
+	// the shell at apply time. See EnvVar.Literal.
+	Expand bool              `json:"expand"`
+	Env    map[string]string `json:"env"`
 }
 
 type EnvVar struct {
 	Key string
 	Val string
-	// Literal marks values that are actual strings (the automatic
-	// WORKSPACE_PATH) and must be applied verbatim. Non-literal values are
-	// zsh double-quoted source text: $VAR and $(...) expand in the user's
-	// shell at apply time, exactly as if the export line were written in
-	// .zshrc. Only trusted configs are ever applied; the trust grant, not
-	// quoting, is the security boundary (a trusted config already controls
-	// PATH).
+	// Literal marks values applied verbatim with single-quoting, so no shell
+	// expansion happens: the automatic WORKSPACE_PATH, and every value of a
+	// strict-mode config (the default). Non-literal values are zsh
+	// double-quoted source text, emitted only when the config sets
+	// "expand": true; $VAR and $(...) then expand in the user's shell at apply
+	// time, exactly as if the export line were written in .zshrc. Only trusted
+	// configs are ever applied; the trust grant, not quoting, is the security
+	// boundary (a trusted config already controls PATH).
 	Literal bool
 }
 
@@ -97,8 +104,15 @@ func parseConfig(path string, data []byte) (Config, error) {
 		if !keyRe.MatchString(key) {
 			return Config{}, fmt.Errorf("invalid env key %q in %s", key, path)
 		}
-		if err := validateQuotedValue(key, path, val); err != nil {
-			return Config{}, err
+		// The value check only matters in expand mode, where the value is
+		// emitted verbatim inside double quotes and a stray " or trailing \
+		// would break the export line. Strict mode single-quotes every value,
+		// which safely carries any content, so the check would only reject
+		// values that are in fact fine.
+		if cfg.Expand {
+			if err := validateQuotedValue(key, path, val); err != nil {
+				return Config{}, err
+			}
 		}
 	}
 	return cfg, nil
@@ -145,7 +159,10 @@ func WorkspaceVars(root string, cfg Config) []EnvVar {
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		vars = append(vars, EnvVar{Key: k, Val: cfg.Env[k]})
+		// Strict mode (the default) applies values literally with single
+		// quotes; expand mode double-quotes them so the shell expands. The
+		// automatic WORKSPACE_PATH is always literal (see above).
+		vars = append(vars, EnvVar{Key: k, Val: cfg.Env[k], Literal: !cfg.Expand})
 	}
 	return vars
 }

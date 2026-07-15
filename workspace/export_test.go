@@ -122,7 +122,8 @@ func TestExportEnterSavesOriginals(t *testing.T) {
 	script := mustBuild(t, root, false)
 	for _, want := range []string{
 		"export WORKSPACE_PATH='" + root + "'",
-		`export SSH_AUTH_SOCK="/1password/agent.sock"`,
+		// Strict mode is the default, so values are single-quoted.
+		"export SSH_AUTH_SOCK='/1password/agent.sock'",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("script missing %q:\n%s", want, script)
@@ -201,7 +202,7 @@ func TestExportSwitchKeepsPreWorkspaceOriginals(t *testing.T) {
 	t.Setenv("WORKSPACE_PATH", rootA)
 
 	enterB := mustBuild(t, rootB, false)
-	if !strings.Contains(enterB, `export SSH_AUTH_SOCK="/b/agent.sock"`) {
+	if !strings.Contains(enterB, "export SSH_AUTH_SOCK='/b/agent.sock'") {
 		t.Errorf("switch does not apply workspace b:\n%s", enterB)
 	}
 	stB := stateFromScript(t, enterB)
@@ -293,7 +294,7 @@ func TestExportTrustInPlaceApplies(t *testing.T) {
 	}
 	// Same pwd, no cd: the very next evaluation must apply the workspace.
 	script = mustBuild(t, root, true)
-	if !strings.Contains(script, `export OP_ACCOUNT="late.example.com"`) {
+	if !strings.Contains(script, "export OP_ACCOUNT='late.example.com'") {
 		t.Errorf("trust did not take effect without a cd:\n%s", script)
 	}
 }
@@ -343,7 +344,7 @@ func TestExportSymlinkedPwdMatchesCanonical(t *testing.T) {
 	}
 
 	script := mustBuild(t, link, false)
-	if !strings.Contains(script, `export OP_ACCOUNT="alias.example.com"`) {
+	if !strings.Contains(script, "export OP_ACCOUNT='alias.example.com'") {
 		t.Fatalf("symlinked entry did not apply:\n%s", script)
 	}
 	st := stateFromScript(t, script)
@@ -374,7 +375,7 @@ func TestExportReappliesAfterEditAndRetrust(t *testing.T) {
 		t.Fatal(err)
 	}
 	script := mustBuild(t, root, true)
-	if !strings.Contains(script, `export FOO="new"`) {
+	if !strings.Contains(script, "export FOO='new'") {
 		t.Errorf("edited and re-trusted config did not reapply:\n%s", script)
 	}
 	if st := stateFromScript(t, script); st.Fingerprint == "" {
@@ -382,12 +383,12 @@ func TestExportReappliesAfterEditAndRetrust(t *testing.T) {
 	}
 }
 
-// Config values are zsh double-quoted source text: $HOME etc. must reach the
-// shell unexpanded and unescaped, while the automatic WORKSPACE_PATH is a
-// real path and stays literal.
+// In expand mode config values are zsh double-quoted source text: $HOME etc.
+// must reach the shell unexpanded and unescaped, while the automatic
+// WORKSPACE_PATH is a real path and stays literal.
 func TestExportConfigValuesExpandInShell(t *testing.T) {
 	t.Setenv(stateEnvKey, "")
-	root := newWorkspaceDir(t, `{"env": {"HOGE": "$HOME/fuga"}}`)
+	root := newWorkspaceDir(t, `{"expand": true, "env": {"HOGE": "$HOME/fuga"}}`)
 
 	script := mustBuild(t, root, false)
 	if !strings.Contains(script, `export HOGE="$HOME/fuga"`) {
@@ -395,6 +396,30 @@ func TestExportConfigValuesExpandInShell(t *testing.T) {
 	}
 	if !strings.Contains(script, "export WORKSPACE_PATH='"+root+"'") {
 		t.Errorf("automatic WORKSPACE_PATH lost its literal quoting:\n%s", script)
+	}
+}
+
+// In strict mode (the default) a value containing $HOME must reach the shell
+// literally: single-quoted, so zsh performs no expansion.
+func TestExportStrictModeDoesNotExpandInZsh(t *testing.T) {
+	zsh, err := exec.LookPath("zsh")
+	if err != nil {
+		t.Skip("zsh not available")
+	}
+	t.Setenv(stateEnvKey, "")
+	os.Unsetenv("HOGE")
+	root := newWorkspaceDir(t, `{"env": {"HOGE": "$HOME/fuga"}}`)
+
+	enter := mustBuild(t, root, false)
+	if !strings.Contains(enter, "export HOGE='$HOME/fuga'") {
+		t.Fatalf("strict value not single-quoted:\n%s", enter)
+	}
+	out, err := exec.Command(zsh, "-c", "HOME=/sallyport-home\n"+enter+"\nprintf 'HOGE=%s\\n' \"$HOGE\"\n").CombinedOutput()
+	if err != nil {
+		t.Fatalf("zsh run failed: %v\n%s", err, out)
+	}
+	if got := string(out); !strings.Contains(got, "HOGE=$HOME/fuga") {
+		t.Errorf("strict mode expanded the value in zsh:\n%s", got)
 	}
 }
 
@@ -712,7 +737,8 @@ func TestExportScriptEvalsInZsh(t *testing.T) {
 	os.Unsetenv("OP_ACCOUNT")
 	os.Unsetenv("HOGE")
 	os.Unsetenv("WORKSPACE_PATH")
-	root := newWorkspaceDir(t, `{"env": {"OP_ACCOUNT": "acct.example.com", "HOGE": "$HOME/fuga"}}`)
+	// expand mode so the shell expands $HOME in the value below.
+	root := newWorkspaceDir(t, `{"expand": true, "env": {"OP_ACCOUNT": "acct.example.com", "HOGE": "$HOME/fuga"}}`)
 
 	enter := mustBuild(t, root, false)
 	// Simulate the shell having applied the workspace, then leave it.
