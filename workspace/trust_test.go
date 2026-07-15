@@ -157,6 +157,75 @@ func TestPruneRemovesTmpAndEmptyRecords(t *testing.T) {
 	}
 }
 
+func skipIfRoot(t *testing.T) {
+	t.Helper()
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses ownership and permission checks")
+	}
+}
+
+func TestInsecureStoreInvalidatesGrants(t *testing.T) {
+	skipIfRoot(t)
+	path := trustSetup(t)
+	if err := Trust(path); err != nil {
+		t.Fatal(err)
+	}
+	if !IsTrusted(path) {
+		t.Fatal("config not trusted after Trust")
+	}
+	// A group-writable store lets another user forge grants, so every grant it
+	// holds must stop counting until the mode is fixed.
+	if err := os.Chmod(trustDir(), 0o770); err != nil {
+		t.Fatal(err)
+	}
+	if IsTrusted(path) {
+		t.Error("grant still honored from a group-writable store")
+	}
+	if _, _, err := LoadTrustedConfig(path); !errors.Is(err, ErrUnsafeTrustStore) {
+		t.Errorf("LoadTrustedConfig: got %v, want ErrUnsafeTrustStore", err)
+	}
+}
+
+func TestTrustRefusesInsecureStore(t *testing.T) {
+	skipIfRoot(t)
+	path := trustSetup(t)
+	if err := Trust(path); err != nil {
+		t.Fatal(err)
+	}
+	// World-writable store: adding a grant to it would let anyone tamper with
+	// the whole set.
+	if err := os.Chmod(trustDir(), 0o707); err != nil {
+		t.Fatal(err)
+	}
+	if err := Trust(path); err == nil {
+		t.Error("Trust accepted a world-writable store")
+	}
+}
+
+func TestTrustRefusesWritableConfigFile(t *testing.T) {
+	skipIfRoot(t)
+	path := trustSetup(t)
+	if err := os.Chmod(path, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if err := Trust(path); err == nil {
+		t.Error("Trust accepted a world-writable config file")
+	}
+}
+
+func TestTrustRefusesWritableParentDir(t *testing.T) {
+	skipIfRoot(t)
+	path := trustSetup(t)
+	// A world-writable parent lets an attacker replace the reviewed config by
+	// rename even if the file itself is read-only.
+	if err := os.Chmod(filepath.Dir(path), 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := Trust(path); err == nil {
+		t.Error("Trust accepted a config in a world-writable directory")
+	}
+}
+
 func TestPruneRemovesStaleRecords(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	kept := t.TempDir()

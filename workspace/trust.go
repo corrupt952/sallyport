@@ -8,10 +8,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // ErrUntrusted marks a config that exists but has no valid trust grant.
 var ErrUntrusted = errors.New("config is not trusted")
+
+// ErrUnsafeTrustStore marks a trust store that exists but could be tampered
+// with by another user (foreign owner or group/world-writable). A grant is
+// just a file whose existence authorizes applying a config's env (PATH
+// included), so if someone else can write to the store they can forge one;
+// no grant it holds can be trusted. This is what direnv #445 warns about.
+var ErrUnsafeTrustStore = errors.New("trust store is not secure")
 
 // Trust records approvals as sha256(config path + content), so any edit to an
 // approved config silently revokes the grant. Without this, cd-ing into a
@@ -24,6 +32,69 @@ func trustDir() string {
 		base = filepath.Join(h, ".local", "share")
 	}
 	return filepath.Join(base, "sallyport", "trust")
+}
+
+// checkOwnerWritable rejects a path not owned by the current user or writable
+// by group or other. Those are precisely the conditions under which someone
+// else could substitute its contents between the moment a grant is recorded
+// (or verified) and the moment sallyport acts on it. The error carries the fix
+// so the user is not left guessing.
+func checkOwnerWritable(path string, fi os.FileInfo) error {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		// Non-unix Sys() shape: we cannot prove ownership, so we cannot vouch
+		// for the path. sallyport only targets unix shells, so this is a guard
+		// against the impossible rather than an expected path.
+		return fmt.Errorf("%s: cannot determine owner", path)
+	}
+	if int(st.Uid) != os.Getuid() {
+		return fmt.Errorf("%s is owned by uid %d, not you (uid %d); chown it to yourself", path, st.Uid, os.Getuid())
+	}
+	if fi.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("%s is writable by others; run: chmod go-w %s", path, path)
+	}
+	return nil
+}
+
+// verifyTrustStore rejects a trust directory an attacker could tamper with. A
+// missing store is safe (it holds no grants) and is not an error: Trust creates
+// it with 0o700. Callers on the apply path treat any error here as "trust
+// nothing"; Trust treats it as a hard refusal.
+func verifyTrustStore() error {
+	dir := trustDir()
+	fi, err := os.Stat(dir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("%s exists but is not a directory; remove it", dir)
+	}
+	return checkOwnerWritable(dir, fi)
+}
+
+// verifyConfigPath rejects a config whose file or containing directory is owned
+// by someone else or writable by group/other. Either lets an attacker swap the
+// bytes a human reviewed for hostile ones around the moment of approval: a
+// writable file is rewritten in place, a writable parent is swapped by rename
+// even when the file itself is read-only. The grant is keyed by the reviewed
+// content, so both must be locked down before trusting.
+func verifyConfigPath(abs string) error {
+	fi, err := os.Stat(abs)
+	if err != nil {
+		return err
+	}
+	if err := checkOwnerWritable(abs, fi); err != nil {
+		return err
+	}
+	parent := filepath.Dir(abs)
+	pfi, err := os.Stat(parent)
+	if err != nil {
+		return err
+	}
+	return checkOwnerWritable(parent, pfi)
 }
 
 // canonical resolves path aliases (macOS /tmp -> /private/tmp, symlinked
@@ -61,6 +132,10 @@ func fingerprintBytes(abs string, content []byte) string {
 }
 
 func IsTrusted(path string) bool {
+	// An insecure store means any grant it holds may be forged; trust nothing.
+	if verifyTrustStore() != nil {
+		return false
+	}
 	fp, err := fingerprint(path)
 	if err != nil {
 		return false
@@ -76,6 +151,11 @@ func IsTrusted(path string) bool {
 // exact bytes that were applied, so callers can detect an edit even when the
 // new content is already trusted again.
 func LoadTrustedConfig(path string) (Config, string, error) {
+	// A forgeable store invalidates every grant, so refuse before reading the
+	// config; the detail is wrapped so callers can match ErrUnsafeTrustStore.
+	if err := verifyTrustStore(); err != nil {
+		return Config{}, "", fmt.Errorf("%w: %v", ErrUnsafeTrustStore, err)
+	}
 	abs, err := canonical(path)
 	if err != nil {
 		return Config{}, "", err
@@ -97,6 +177,11 @@ func Trust(path string) error {
 	if err != nil {
 		return err
 	}
+	// Reject a config someone else could swap between review and approval: the
+	// grant would then vouch for bytes the human never saw.
+	if err := verifyConfigPath(abs); err != nil {
+		return fmt.Errorf("refusing to trust: %w", err)
+	}
 	content, err := readConfigFile(abs)
 	if err != nil {
 		return err
@@ -106,6 +191,11 @@ func Trust(path string) error {
 	// Approving bytes that cannot be parsed would create a grant the export
 	// path can never use, and would warn on every cd instead of failing here.
 	if _, err := parseConfig(abs, content); err != nil {
+		return fmt.Errorf("refusing to trust: %w", err)
+	}
+	// If the store already exists it must be secure before we add a grant to
+	// it; a missing store is created below with 0o700.
+	if err := verifyTrustStore(); err != nil {
 		return fmt.Errorf("refusing to trust: %w", err)
 	}
 	if err := os.MkdirAll(trustDir(), 0o700); err != nil {
@@ -135,6 +225,11 @@ func Trust(path string) error {
 // whose recorded path is the target's canonical path revokes all of them,
 // including the one for the content presently on disk.
 func Untrust(path string) error {
+	// Consistent with the other entry points: surface an insecure store rather
+	// than mutating it silently, so the user fixes it before relying on trust.
+	if err := verifyTrustStore(); err != nil {
+		return fmt.Errorf("refusing to untrust: %w", err)
+	}
 	target, err := canonical(path)
 	if err != nil {
 		return err

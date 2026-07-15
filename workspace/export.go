@@ -154,6 +154,15 @@ func BuildExportScript(pwd string, quiet bool) (ExportResult, error) {
 	var fp string
 	if root != "" {
 		switch cfg, loadedFP, err := LoadTrustedConfig(ConfigPath(root)); {
+		case errors.Is(err, ErrUnsafeTrustStore):
+			// The store itself is tampering-exposed, so no grant it holds can be
+			// trusted; treat the workspace as if it did not exist. Same rollback
+			// and warning gating as the untrusted case: a silent rollback of an
+			// applied workspace would confuse the user.
+			if !quiet || root == st.Root {
+				warnings = append(warnings, fmt.Sprintf("sallyport: %v; refusing to apply %s", err, ConfigPath(root)))
+			}
+			root = ""
 		case errors.Is(err, ErrUntrusted):
 			// Treated as if the workspace did not exist: the previous
 			// workspace still gets restored, but nothing is applied. The

@@ -614,6 +614,54 @@ func TestExportUntrustedWarningGating(t *testing.T) {
 	}
 }
 
+// An insecure trust store is treated like an untrusted workspace: nothing is
+// applied, the previous workspace is still rolled back, and the warning follows
+// the same gating (silenced under quiet unless the applied workspace is the one
+// that can no longer be trusted).
+func TestExportUnsafeTrustStoreWarningGating(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses ownership and permission checks")
+	}
+	root := newWorkspaceDir(t, `{"env": {"OP_ACCOUNT": "x"}}`)
+	// Make the store forgeable after the grant was recorded.
+	if err := os.Chmod(trustDir(), 0o770); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv(stateEnvKey, "")
+	res, err := BuildExportScript(root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasWarning(res.Warnings, "not secure") {
+		t.Errorf("expected unsafe-store warning when not quiet: %v", res.Warnings)
+	}
+	if strings.Contains(res.Script, "OP_ACCOUNT='x'") {
+		t.Errorf("workspace applied despite an insecure store:\n%s", res.Script)
+	}
+
+	// Quiet, and the applied workspace is elsewhere: stay silent.
+	setState(t, state{Root: "/somewhere/else"})
+	res, err = BuildExportScript(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasWarning(res.Warnings, "not secure") {
+		t.Errorf("unsafe-store warning should be suppressed under quiet away from the applied root: %v", res.Warnings)
+	}
+
+	// Quiet, but this very workspace is applied: force the warning, since the
+	// environment is being rolled back.
+	setState(t, state{Root: root, Saved: map[string]*string{"OP_ACCOUNT": nil}})
+	res, err = BuildExportScript(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasWarning(res.Warnings, "not secure") {
+		t.Errorf("unsafe-store warning must be forced when the applied workspace can no longer be trusted: %v", res.Warnings)
+	}
+}
+
 func TestExportBrokenConfigWarningGating(t *testing.T) {
 	root := newUntrustedWorkspaceDir(t, `{"env": {"$(whoami)": "x"}}`)
 	forgeGrant(t, root)
