@@ -23,6 +23,14 @@ type Config struct {
 type EnvVar struct {
 	Key string
 	Val string
+	// Literal marks values that are actual strings (the automatic
+	// WORKSPACE_PATH) and must be applied verbatim. Non-literal values are
+	// zsh double-quoted source text: $VAR and $(...) expand in the user's
+	// shell at apply time, exactly as if the export line were written in
+	// .zshrc. Only trusted configs are ever applied; the trust grant, not
+	// quoting, is the security boundary (a trusted config already controls
+	// PATH).
+	Literal bool
 }
 
 // Keys end up unquoted in `export KEY=...` statements that the shell evals,
@@ -99,7 +107,7 @@ func parseConfig(path string, data []byte) (Config, error) {
 func WorkspaceVars(root string, cfg Config) []EnvVar {
 	var vars []EnvVar
 	if _, ok := cfg.Env["WORKSPACE_PATH"]; !ok {
-		vars = append(vars, EnvVar{Key: "WORKSPACE_PATH", Val: root})
+		vars = append(vars, EnvVar{Key: "WORKSPACE_PATH", Val: root, Literal: true})
 	}
 	keys := make([]string, 0, len(cfg.Env))
 	for k := range cfg.Env {

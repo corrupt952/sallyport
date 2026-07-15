@@ -162,7 +162,14 @@ func BuildExportScript(pwd string, quiet bool) (string, error) {
 		} else {
 			newSaved[v.Key] = nil
 		}
-		fmt.Fprintf(&b, "export %s=%s\n", v.Key, zshQuote(v.Val))
+		if v.Literal {
+			fmt.Fprintf(&b, "export %s=%s\n", v.Key, zshQuote(v.Val))
+		} else {
+			// Config values are emitted verbatim between double quotes: the
+			// value is zsh double-quoted source text and the shell owns its
+			// expansion semantics, escapes included (see EnvVar.Literal).
+			fmt.Fprintf(&b, "export %s=\"%s\"\n", v.Key, v.Val)
+		}
 	}
 
 	if root == "" {

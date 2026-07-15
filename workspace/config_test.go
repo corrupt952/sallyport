@@ -122,7 +122,7 @@ func TestWorkspaceVars(t *testing.T) {
 	}
 	vars := WorkspaceVars(dir, cfg)
 	want := []EnvVar{
-		{Key: "WORKSPACE_PATH", Val: dir},
+		{Key: "WORKSPACE_PATH", Val: dir, Literal: true},
 		{Key: "A_KEY", Val: "a"},
 		{Key: "B_KEY", Val: "b"},
 	}

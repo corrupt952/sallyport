@@ -82,7 +82,7 @@ func TestExportEnterSavesOriginals(t *testing.T) {
 	}
 	for _, want := range []string{
 		"export WORKSPACE_PATH='" + root + "'",
-		"export SSH_AUTH_SOCK='/1password/agent.sock'",
+		`export SSH_AUTH_SOCK="/1password/agent.sock"`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("script missing %q:\n%s", want, script)
@@ -162,7 +162,7 @@ func TestExportSwitchKeepsPreWorkspaceOriginals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(enterB, "export SSH_AUTH_SOCK='/b/agent.sock'") {
+	if !strings.Contains(enterB, `export SSH_AUTH_SOCK="/b/agent.sock"`) {
 		t.Errorf("switch does not apply workspace b:\n%s", enterB)
 	}
 	stB := stateFromScript(t, enterB)
@@ -285,7 +285,7 @@ func TestExportTrustInPlaceApplies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(script, "export OP_ACCOUNT='late.example.com'") {
+	if !strings.Contains(script, `export OP_ACCOUNT="late.example.com"`) {
 		t.Errorf("trust did not take effect without a cd:\n%s", script)
 	}
 }
@@ -338,7 +338,7 @@ func TestExportSymlinkedPwdMatchesCanonical(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(script, "export OP_ACCOUNT='alias.example.com'") {
+	if !strings.Contains(script, `export OP_ACCOUNT="alias.example.com"`) {
 		t.Fatalf("symlinked entry did not apply:\n%s", script)
 	}
 	st := stateFromScript(t, script)
@@ -354,6 +354,25 @@ func TestExportSymlinkedPwdMatchesCanonical(t *testing.T) {
 	}
 	if script != "" {
 		t.Errorf("alias switch caused churn:\n%s", script)
+	}
+}
+
+// Config values are zsh double-quoted source text: $HOME etc. must reach the
+// shell unexpanded and unescaped, while the automatic WORKSPACE_PATH is a
+// real path and stays literal.
+func TestExportConfigValuesExpandInShell(t *testing.T) {
+	t.Setenv(stateEnvKey, "")
+	root := newWorkspaceDir(t, `{"env": {"HOGE": "$HOME/fuga"}}`)
+
+	script, err := BuildExportScript(root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(script, `export HOGE="$HOME/fuga"`) {
+		t.Errorf("config value not emitted as shell-expandable source:\n%s", script)
+	}
+	if !strings.Contains(script, "export WORKSPACE_PATH='"+root+"'") {
+		t.Errorf("automatic WORKSPACE_PATH lost its literal quoting:\n%s", script)
 	}
 }
 
