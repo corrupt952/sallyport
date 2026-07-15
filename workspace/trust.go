@@ -72,21 +72,24 @@ func IsTrusted(path string) bool {
 // LoadTrustedConfig reads the config exactly once, verifies the trust grant
 // against those bytes, and parses the very same bytes. Verifying and parsing
 // on separate reads would leave a window where the approved content and the
-// applied content differ (TOCTOU).
-func LoadTrustedConfig(path string) (Config, error) {
+// applied content differ (TOCTOU). The returned fingerprint identifies the
+// exact bytes that were applied, so callers can detect an edit even when the
+// new content is already trusted again.
+func LoadTrustedConfig(path string) (Config, string, error) {
 	abs, err := canonical(path)
 	if err != nil {
-		return Config{}, err
+		return Config{}, "", err
 	}
 	content, err := readConfigFile(abs)
 	if err != nil {
-		return Config{}, err
+		return Config{}, "", err
 	}
 	fp := fingerprintBytes(abs, content)
 	if _, err := os.Stat(filepath.Join(trustDir(), fp)); err != nil {
-		return Config{}, ErrUntrusted
+		return Config{}, "", ErrUntrusted
 	}
-	return parseConfig(abs, content)
+	cfg, err := parseConfig(abs, content)
+	return cfg, fp, err
 }
 
 func Trust(path string) error {

@@ -32,6 +32,11 @@ const stateShellVar = "__sallyport_state"
 // before sallyport ever ran.
 type state struct {
 	Root string `json:"root"`
+	// Fingerprint of the config bytes that were applied. Comparing the root
+	// alone misses an edit that gets re-trusted between two prompts: the
+	// untrusted intermediate state is never observed, so without this the old
+	// values would stay applied until the workspace is left.
+	Fingerprint string `json:"fingerprint,omitempty"`
 	// nil means the variable did not exist before sallyport touched it.
 	Saved map[string]*string `json:"saved"`
 }
@@ -97,8 +102,9 @@ func BuildExportScript(pwd string, quiet bool) (string, error) {
 	root := FindRoot(pwd)
 
 	var vars []EnvVar
+	var fp string
 	if root != "" {
-		switch cfg, err := LoadTrustedConfig(ConfigPath(root)); {
+		switch cfg, loadedFP, err := LoadTrustedConfig(ConfigPath(root)); {
 		case errors.Is(err, ErrUntrusted):
 			// Treated as if the workspace did not exist: the previous
 			// workspace still gets restored, but nothing is applied. The
@@ -118,6 +124,7 @@ func BuildExportScript(pwd string, quiet bool) (string, error) {
 			}
 		default:
 			vars = WorkspaceVars(root, cfg)
+			fp = loadedFP
 			// direnv and sallyport are unaware of each other and would fight
 			// over shared variables non-deterministically; make coexistence
 			// visible instead of mysterious.
@@ -128,8 +135,10 @@ func BuildExportScript(pwd string, quiet bool) (string, error) {
 	}
 
 	// The comparison runs after trust filtering, not before: revocation and
-	// expiry must take effect on the next prompt even without a cd.
-	if root == st.Root {
+	// expiry must take effect on the next prompt even without a cd. The
+	// fingerprint participates so an edited-and-retrusted config reapplies
+	// even though the root never changed.
+	if root == st.Root && fp == st.Fingerprint {
 		return "", nil
 	}
 
@@ -175,7 +184,7 @@ func BuildExportScript(pwd string, quiet bool) (string, error) {
 	if root == "" {
 		fmt.Fprintf(&b, "unset %s\n", stateShellVar)
 	} else {
-		encoded, err := encodeState(state{Root: root, Saved: newSaved})
+		encoded, err := encodeState(state{Root: root, Fingerprint: fp, Saved: newSaved})
 		if err != nil {
 			return "", err
 		}

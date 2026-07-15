@@ -100,9 +100,20 @@ func TestExportEnterSavesOriginals(t *testing.T) {
 	}
 }
 
+// configFingerprint mirrors the fingerprint of root's config as
+// LoadTrustedConfig would compute it, for building applied states in tests.
+func configFingerprint(t *testing.T, root string) string {
+	t.Helper()
+	fp, err := fingerprint(ConfigPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fp
+}
+
 func TestExportNoopWithinSameWorkspace(t *testing.T) {
 	root := newWorkspaceDir(t, `{"env": {}}`)
-	setState(t, state{Root: root, Saved: map[string]*string{}})
+	setState(t, state{Root: root, Fingerprint: configFingerprint(t, root), Saved: map[string]*string{}})
 
 	if err := os.MkdirAll(filepath.Join(root, "repo", "sub"), 0o755); err != nil {
 		t.Fatal(err)
@@ -354,6 +365,35 @@ func TestExportSymlinkedPwdMatchesCanonical(t *testing.T) {
 	}
 	if script != "" {
 		t.Errorf("alias switch caused churn:\n%s", script)
+	}
+}
+
+// An edit that gets re-trusted between two prompts must reapply: only the
+// fingerprint distinguishes it, because the root never changed and the
+// untrusted intermediate state is never observed.
+func TestExportReappliesAfterEditAndRetrust(t *testing.T) {
+	t.Setenv(stateEnvKey, "")
+	root := newWorkspaceDir(t, `{"env": {"FOO": "old"}}`)
+
+	enter, err := BuildExportScript(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setState(t, stateFromScript(t, enter))
+
+	writeConfig(t, root, `{"env": {"FOO": "new"}}`)
+	if err := Trust(ConfigPath(root)); err != nil {
+		t.Fatal(err)
+	}
+	script, err := BuildExportScript(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(script, `export FOO="new"`) {
+		t.Errorf("edited and re-trusted config did not reapply:\n%s", script)
+	}
+	if st := stateFromScript(t, script); st.Fingerprint == "" {
+		t.Error("reapplied state has no fingerprint")
 	}
 }
 

@@ -66,18 +66,20 @@ func TestUntrustWithoutGrant(t *testing.T) {
 func TestLoadTrustedConfig(t *testing.T) {
 	path := trustSetup(t)
 
-	if _, err := LoadTrustedConfig(path); !errors.Is(err, ErrUntrusted) {
+	if _, _, err := LoadTrustedConfig(path); !errors.Is(err, ErrUntrusted) {
 		t.Fatalf("unapproved config: got %v, want ErrUntrusted", err)
 	}
 	if err := Trust(path); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadTrustedConfig(path); err != nil {
+	if _, fp, err := LoadTrustedConfig(path); err != nil {
 		t.Fatalf("approved config rejected: %v", err)
+	} else if fp == "" {
+		t.Fatal("approved config returned no fingerprint")
 	}
 
 	writeConfig(t, filepath.Dir(path), `{"env": {"ADDED": "later"}}`)
-	if _, err := LoadTrustedConfig(path); !errors.Is(err, ErrUntrusted) {
+	if _, _, err := LoadTrustedConfig(path); !errors.Is(err, ErrUntrusted) {
 		t.Fatalf("edited config: got %v, want ErrUntrusted", err)
 	}
 }
