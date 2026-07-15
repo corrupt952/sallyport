@@ -104,5 +104,7 @@ zsdoc/data
 
 # Sallyport
 /sallyport
+/.direnv/
+!/.envrc
 .sallyport.jsonc
 .claude/
