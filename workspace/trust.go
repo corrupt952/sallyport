@@ -253,7 +253,9 @@ func Untrust(path string) error {
 		if strings.TrimSpace(string(data)) != target {
 			continue
 		}
-		if err := os.Remove(record); err != nil {
+		// A concurrent untrust or prune may have removed the record first;
+		// the goal (no grant on disk) is met either way.
+		if err := os.Remove(record); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 		removed++
@@ -269,6 +271,11 @@ func Untrust(path string) error {
 // leftovers of interrupted writes. Grants for edited configs are kept on
 // purpose: restoring the original bytes legitimately revives them.
 func Prune() error {
+	// Consistent with the other entry points: surface an insecure store rather
+	// than mutating it silently, so the user fixes it before relying on trust.
+	if err := verifyTrustStore(); err != nil {
+		return fmt.Errorf("refusing to prune: %w", err)
+	}
 	entries, err := os.ReadDir(trustDir())
 	if os.IsNotExist(err) {
 		Info("nothing to prune")
@@ -281,7 +288,7 @@ func Prune() error {
 	for _, e := range entries {
 		record := filepath.Join(trustDir(), e.Name())
 		if strings.HasSuffix(e.Name(), ".tmp") {
-			if err := os.Remove(record); err != nil {
+			if err := os.Remove(record); err != nil && !os.IsNotExist(err) {
 				return err
 			}
 			removed++
@@ -295,7 +302,7 @@ func Prune() error {
 		if path == "" {
 			// Only an interrupted write by an older version leaves an empty
 			// record; it can never be matched intentionally.
-			if err := os.Remove(record); err != nil {
+			if err := os.Remove(record); err != nil && !os.IsNotExist(err) {
 				return err
 			}
 			removed++
@@ -309,7 +316,7 @@ func Prune() error {
 				Warn("cannot stat %s, keeping grant: %v", path, err)
 				continue
 			}
-			if err := os.Remove(record); err != nil {
+			if err := os.Remove(record); err != nil && !os.IsNotExist(err) {
 				return err
 			}
 			removed++
