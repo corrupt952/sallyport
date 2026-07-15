@@ -3,6 +3,7 @@ package command
 import (
 	"context"
 	"flag"
+	"os"
 
 	"github.com/google/subcommands"
 
@@ -21,7 +22,11 @@ func (*UntrustCommand) Usage() string {
 func (*UntrustCommand) SetFlags(f *flag.FlagSet) {}
 
 func (c *UntrustCommand) Execute(_ context.Context, f *flag.FlagSet, _ ...interface{}) subcommands.ExitStatus {
-	path, status := nearestConfig(f, c.Usage())
+	pwd, err := os.Getwd()
+	if err != nil {
+		return fail(err)
+	}
+	path, status := nearestConfig(f, pwd, c.Usage())
 	if path == "" {
 		return status
 	}

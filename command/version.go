@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"os"
 	"runtime/debug"
 
 	"github.com/google/subcommands"
@@ -33,7 +34,11 @@ func (*VersionCommand) Usage() string {
 
 func (*VersionCommand) SetFlags(f *flag.FlagSet) {}
 
-func (*VersionCommand) Execute(_ context.Context, f *flag.FlagSet, _ ...interface{}) subcommands.ExitStatus {
+func (c *VersionCommand) Execute(_ context.Context, f *flag.FlagSet, _ ...interface{}) subcommands.ExitStatus {
+	if f.NArg() != 0 {
+		fmt.Fprint(os.Stderr, c.Usage())
+		return subcommands.ExitUsageError
+	}
 	fmt.Println(version())
 	return subcommands.ExitSuccess
 }
