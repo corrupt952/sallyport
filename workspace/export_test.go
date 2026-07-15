@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -144,7 +145,7 @@ func TestExportLeaveRestoresOriginals(t *testing.T) {
 	for _, want := range []string{
 		"export SSH_AUTH_SOCK='/original/agent.sock'",
 		"unset WORKSPACE_PATH",
-		"unset " + stateShellVar,
+		"typeset -g " + stateShellVar + "=''",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("script missing %q:\n%s", want, script)
@@ -231,7 +232,7 @@ func TestExportSkipsUntrustedConfig(t *testing.T) {
 	// The previous workspace must still be rolled back.
 	for _, want := range []string{
 		"export SSH_AUTH_SOCK='/original/agent.sock'",
-		"unset " + stateShellVar,
+		"typeset -g " + stateShellVar + "=''",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("script missing %q:\n%s", want, script)
@@ -268,7 +269,7 @@ func TestExportUntrustInPlaceRollsBack(t *testing.T) {
 	}
 	for _, want := range []string{
 		"export SSH_AUTH_SOCK='/original/agent.sock'",
-		"unset " + stateShellVar,
+		"typeset -g " + stateShellVar + "=''",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("script missing %q:\n%s", want, script)
@@ -327,7 +328,7 @@ func TestZshHookPassesStateAsOneShotEnvVar(t *testing.T) {
 	if !strings.Contains(script, "typeset -g "+stateShellVar) {
 		t.Errorf("shim does not declare a non-exported state global:\n%s", script)
 	}
-	if !strings.Contains(script, stateEnvKey+`="$`+stateShellVar+`"`) {
+	if !strings.Contains(script, stateEnvKey+`="${`+stateShellVar+`-}"`) {
 		t.Errorf("shim does not pass state as a one-shot env var to the binary invocation:\n%s", script)
 	}
 	if strings.Contains(script, "export "+stateEnvKey) {
@@ -475,6 +476,110 @@ func TestExportNeverExportsState(t *testing.T) {
 	}
 	if strings.Contains(leaveScript, "export "+stateEnvKey) {
 		t.Errorf("state was exported on leave:\n%s", leaveScript)
+	}
+}
+
+// Regression guard: leaving a workspace must clear the state global by
+// assignment, never `unset`. Under `setopt nounset` a later "${__sallyport_state}"
+// reference to an unset global aborts the hook with `parameter not set`, which
+// stops it permanently.
+func TestExportLeaveClearsStateWithoutUnset(t *testing.T) {
+	orig := "/original/agent.sock"
+	setState(t, state{Root: "/somewhere/demo", Saved: map[string]*string{"SSH_AUTH_SOCK": &orig}})
+
+	script, err := BuildExportScript(t.TempDir(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(script, "unset "+stateShellVar) {
+		t.Errorf("leave unsets the state global; nounset would break the hook:\n%s", script)
+	}
+	if !strings.Contains(script, "typeset -g "+stateShellVar+"=''") {
+		t.Errorf("leave does not clear the state global by assignment:\n%s", script)
+	}
+}
+
+// Regression guard: the shim must read the state global with a default so
+// `setopt nounset` cannot abort the hook, and must never reference it bare.
+func TestZshHookStateReferenceIsNounsetSafe(t *testing.T) {
+	script, err := ZshHook()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(script, `"$`+stateShellVar+`"`) {
+		t.Errorf("shim references the state global without a nounset default:\n%s", script)
+	}
+	if !strings.Contains(script, `"${`+stateShellVar+`-}"`) {
+		t.Errorf("shim does not guard the state reference against nounset:\n%s", script)
+	}
+}
+
+// Regression guard: masking SIGINT must be confined with localtraps so a
+// user-defined INT trap is restored on return, not clobbered. The old
+// `trap - SIGINT` reset it to the default.
+func TestZshHookPreservesUserIntTrap(t *testing.T) {
+	script, err := ZshHook()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(script, "localtraps") {
+		t.Errorf("shim does not confine trap changes with localtraps:\n%s", script)
+	}
+	if strings.Contains(script, "trap - SIGINT") {
+		t.Errorf("shim still resets SIGINT to default, clobbering user traps:\n%s", script)
+	}
+}
+
+// Drive the real shim under zsh to prove the two shell-level fixes: a
+// user-defined INT trap survives a hook run (localtraps), and running the hook
+// under `setopt nounset` after the state global was cleared does not abort.
+func TestZshHookRealZshBehavior(t *testing.T) {
+	zsh, err := exec.LookPath("zsh")
+	if err != nil {
+		t.Skip("zsh not available")
+	}
+
+	shim, err := ZshHook()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Replace the eval line with a no-op: this test exercises the shell
+	// mechanics (trap/nounset), not the binary, which is not built here.
+	lines := strings.Split(shim, "\n")
+	for i, l := range lines {
+		if strings.Contains(l, "eval \"$(") {
+			lines[i] = "  :"
+		}
+	}
+	shim = strings.Join(lines, "\n")
+
+	script := shim + `
+trap 'print USERTRAP' INT
+_sallyport_hook
+# zsh's bare ` + "`trap`" + ` lists set traps as ` + "`trap -- 'cmd' SIG`" + `; call it
+# directly, not in $(...), which runs in a subshell that resets traps.
+print "=== after-trap ==="
+trap
+
+setopt nounset
+typeset -g ` + stateShellVar + `=''
+val="${` + stateShellVar + `-}"
+_sallyport_hook
+print "nounset-ok"
+`
+	out, err := exec.Command(zsh, "-c", script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("zsh run failed: %v\n%s", err, out)
+	}
+	got := string(out)
+	// The user INT trap must still be registered after the hook returns; the
+	// listing carries its command body only if it survived.
+	if !strings.Contains(got, "trap -- 'print USERTRAP' INT") {
+		t.Errorf("user INT trap was clobbered by the hook:\n%s", got)
+	}
+	// The hook must complete under nounset with an empty state global.
+	if !strings.Contains(got, "nounset-ok") {
+		t.Errorf("hook aborted under nounset:\n%s", got)
 	}
 }
 

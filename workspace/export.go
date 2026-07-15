@@ -45,7 +45,9 @@ type state struct {
 // shim only evals `sallyport export zsh` output. It must never propagate an error:
 // zsh stops running subsequent chpwd hooks when one fails, which would break
 // unrelated plugins. SIGINT is masked around the eval so a Ctrl-C cannot stop
-// it halfway and leave the environment and stateShellVar inconsistent.
+// it halfway and leave the environment and stateShellVar inconsistent; the
+// mask is confined with `localtraps` so a user-defined INT trap is restored on
+// return instead of being reset to the default.
 //
 // stateShellVar is declared with `typeset -g` (non-exported) rather than
 // exported: an exported state would be inherited by every child process the
@@ -72,9 +74,17 @@ func ZshHook() (string, error) {
 	}
 	return fmt.Sprintf(`typeset -g %[1]s
 _sallyport_hook() {
+  # localoptions/localtraps confine both the SIGINT mask and any option change
+  # to this function: zsh restores the caller's traps on return, so a
+  # user-defined INT trap survives instead of being reset to the default. The
+  # mask still guarantees a Ctrl-C cannot stop the eval halfway and leave the
+  # environment and stateShellVar inconsistent.
+  setopt localoptions localtraps
   trap -- '' SIGINT
-  eval "$(%[2]s="$%[1]s" "%[3]s" export "$@" zsh)"
-  trap - SIGINT
+  # ${...-} guards against setopt nounset: after a workspace is left the state
+  # global is set to '' (not unset), but a defensive default keeps the hook
+  # working even if some other code unset it.
+  eval "$(%[2]s="${%[1]s-}" "%[3]s" export "$@" zsh)"
   return 0
 }
 _sallyport_hook_precmd() {
@@ -182,7 +192,11 @@ func BuildExportScript(pwd string, quiet bool) (string, error) {
 	}
 
 	if root == "" {
-		fmt.Fprintf(&b, "unset %s\n", stateShellVar)
+		// Assign '' rather than unset: under `setopt nounset` a later
+		// "${__sallyport_state}" reference to an unset global aborts the hook
+		// with `parameter not set`, stopping it permanently. loadState already
+		// treats the empty string as "no state".
+		fmt.Fprintf(&b, "typeset -g %s=''\n", stateShellVar)
 	} else {
 		encoded, err := encodeState(state{Root: root, Fingerprint: fp, Saved: newSaved})
 		if err != nil {

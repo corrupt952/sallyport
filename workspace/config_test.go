@@ -3,8 +3,13 @@ package workspace
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
+
+// quoteJSON renders s as a JSON string literal; strconv.Quote's escaping of "
+// and \ is a valid subset of JSON for the ASCII values these tests use.
+func quoteJSON(s string) string { return strconv.Quote(s) }
 
 func writeConfig(t *testing.T, dir, content string) {
 	t.Helper()
@@ -50,6 +55,38 @@ func TestLoadConfigRejectsNonStringValue(t *testing.T) {
 	writeConfig(t, dir, `{"env": {"PORT": 8080}}`)
 	if _, err := LoadConfig(ConfigPath(dir)); err == nil {
 		t.Error("non-string env value accepted, want error")
+	}
+}
+
+func TestLoadConfigRejectsUnquotableValue(t *testing.T) {
+	// A value that cannot be emitted as a zsh double-quoted body would break the
+	// generated `export KEY="..."` line and fail the whole eval (state commit
+	// included); parseConfig must reject it up front.
+	cases := map[string]string{
+		"unescaped double quote": `a"b`,
+		"trailing backslash":     `abc\`,
+		"only a backslash":       `\`,
+	}
+	for name, val := range cases {
+		dir := t.TempDir()
+		writeConfig(t, dir, `{"env": {"FOO": `+quoteJSON(val)+`}}`)
+		if _, err := LoadConfig(ConfigPath(dir)); err == nil {
+			t.Errorf("%s: value %q accepted, want error", name, val)
+		}
+	}
+}
+
+func TestLoadConfigAcceptsEscapedValue(t *testing.T) {
+	// Properly escaped sequences are legal double-quoted source text and must
+	// pass: a `\"` is a literal quote, a `\\` a literal backslash.
+	dir := t.TempDir()
+	writeConfig(t, dir, `{"env": {"FOO": `+quoteJSON(`a\"b\\c`)+`}}`)
+	cfg, err := LoadConfig(ConfigPath(dir))
+	if err != nil {
+		t.Fatalf("escaped value rejected: %v", err)
+	}
+	if cfg.Env["FOO"] != `a\"b\\c` {
+		t.Errorf("FOO = %q", cfg.Env["FOO"])
 	}
 }
 

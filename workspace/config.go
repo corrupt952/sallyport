@@ -93,12 +93,42 @@ func parseConfig(path string, data []byte) (Config, error) {
 	if err := json.Unmarshal(std, &cfg); err != nil {
 		return Config{}, fmt.Errorf("%s: %w", path, err)
 	}
-	for key := range cfg.Env {
+	for key, val := range cfg.Env {
 		if !keyRe.MatchString(key) {
 			return Config{}, fmt.Errorf("invalid env key %q in %s", key, path)
 		}
+		if err := validateQuotedValue(key, path, val); err != nil {
+			return Config{}, err
+		}
 	}
 	return cfg, nil
+}
+
+// validateQuotedValue rejects values that would not survive being emitted as
+// the body of a zsh double-quoted string (see EnvVar.Literal and export.go).
+// Config values are written verbatim inside `export KEY="..."`, so an
+// unescaped `"` closes the string early and a trailing `\` escapes the closing
+// quote — either one corrupts that line. Because the hook evals the entire
+// export script as a single unit, one broken line fails the whole eval,
+// including the state commit, leaving the shell's sallyport state stuck. We
+// catch it at parse time so both `sallyport trust` and every load refuse it up
+// front instead of breaking the shell later.
+func validateQuotedValue(key, path, val string) error {
+	for i := 0; i < len(val); i++ {
+		switch val[i] {
+		case '\\':
+			// A backslash escapes the following byte and consumes it; a
+			// trailing one has nothing to escape and would swallow the closing
+			// quote instead.
+			i++
+			if i >= len(val) {
+				return fmt.Errorf("invalid env value for %q in %s: ends with a dangling backslash; write \\\\ for a literal backslash", key, path)
+			}
+		case '"':
+			return fmt.Errorf("invalid env value for %q in %s: contains an unescaped double quote; write \\\" for a literal quote", key, path)
+		}
+	}
+	return nil
 }
 
 // WorkspaceVars returns the variables to apply for root, in deterministic
