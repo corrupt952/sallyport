@@ -672,24 +672,92 @@ func TestExportCorruptStateWarns(t *testing.T) {
 	}
 }
 
+// A state written by a different sallyport version (here: no schema field) must
+// warn on a non-quiet call, be suppressed on quiet, and still have its
+// recovered originals applied — the mismatch is best-effort, not a reset.
+func TestExportSchemaMismatchWarnsButKeepsState(t *testing.T) {
+	// Legacy blob: a previous workspace's saved original, no schema field.
+	legacy := base64.StdEncoding.EncodeToString([]byte(
+		`{"root":"/previous/demo","saved":{"SSH_AUTH_SOCK":"/original/agent.sock"}}`))
+
+	t.Setenv(stateEnvKey, legacy)
+	res, err := BuildExportScript(t.TempDir(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasWarning(res.Warnings, "different sallyport version") {
+		t.Errorf("expected schema-mismatch warning: %v", res.Warnings)
+	}
+	// Best-effort: the recovered original is still rolled back despite the
+	// mismatch, rather than discarded like a corrupt state.
+	if !strings.Contains(res.Script, "export SSH_AUTH_SOCK='/original/agent.sock'") {
+		t.Errorf("legacy state's originals were not applied:\n%s", res.Script)
+	}
+
+	t.Setenv(stateEnvKey, legacy)
+	res, err = BuildExportScript(t.TempDir(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasWarning(res.Warnings, "different sallyport version") {
+		t.Errorf("schema-mismatch warning should be suppressed under quiet: %v", res.Warnings)
+	}
+}
+
 func TestDecodeState(t *testing.T) {
 	// The empty string is "no state", the same value the hook writes on leave.
-	if s, err := decodeState(""); err != nil || s.Root != "" {
-		t.Errorf("empty string: state=%v err=%v, want zero state and nil", s, err)
+	if s, mismatch, err := decodeState(""); err != nil || mismatch || s.Root != "" {
+		t.Errorf("empty string: state=%v mismatch=%v err=%v, want zero state, no mismatch, nil", s, mismatch, err)
 	}
 	enc, err := encodeState(state{Root: "/x", Fingerprint: "fp"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s, err := decodeState(enc); err != nil || s.Root != "/x" || s.Fingerprint != "fp" {
-		t.Errorf("roundtrip: state=%v err=%v", s, err)
+	// A state this binary just encoded carries the current schema, so it must
+	// round-trip without a mismatch.
+	if s, mismatch, err := decodeState(enc); err != nil || mismatch || s.Root != "/x" || s.Fingerprint != "fp" {
+		t.Errorf("roundtrip: state=%v mismatch=%v err=%v", s, mismatch, err)
 	}
-	if _, err := decodeState("@@@not-base64"); err == nil {
+	if _, _, err := decodeState("@@@not-base64"); err == nil {
 		t.Error("invalid base64 accepted, want error")
 	}
 	notJSON := base64.StdEncoding.EncodeToString([]byte("not json"))
-	if _, err := decodeState(notJSON); err == nil {
+	if _, _, err := decodeState(notJSON); err == nil {
 		t.Error("valid base64 but invalid JSON accepted, want error")
+	}
+}
+
+// stateSchemaString pins the state wire layout. If you change the state struct
+// (add, remove, rename, or retype a field) this string changes and the test
+// fails on purpose — decide whether the change is wire-compatible before
+// updating `want`. Go's json ignores unknown fields and zero-fills missing
+// ones, so ADDING an optional field is compatible; but when you change the
+// MEANING of an existing field you MUST also change its JSON field name, so old
+// state reads as a (safe) missing field instead of being silently misread.
+func TestStateSchemaString(t *testing.T) {
+	const want = "fingerprint:string,root:string,saved:map[string]*string"
+	if got := stateSchemaString(); got != want {
+		t.Errorf("state schema changed:\n got %q\nwant %q\nRead this test's comment before updating want.", got, want)
+	}
+}
+
+// A state written by a different layout (here: no schema field, as older
+// sallyport wrote) must decode, be flagged as a mismatch, and still yield its
+// recovered originals — Go zero-fills the missing schema and keeps the rest.
+func TestDecodeStateSchemaMismatchKeepsData(t *testing.T) {
+	legacy := base64.StdEncoding.EncodeToString([]byte(`{"root":"/x","saved":{"FOO":null}}`))
+	s, mismatch, err := decodeState(legacy)
+	if err != nil {
+		t.Fatalf("legacy state failed to decode: %v", err)
+	}
+	if !mismatch {
+		t.Error("missing schema not flagged as mismatch")
+	}
+	if s.Root != "/x" {
+		t.Errorf("compatible field lost across schema mismatch: root=%q", s.Root)
+	}
+	if _, hit := s.Saved["FOO"]; !hit {
+		t.Errorf("saved originals lost across schema mismatch: %v", s.Saved)
 	}
 }
 

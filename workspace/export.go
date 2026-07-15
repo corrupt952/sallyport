@@ -1,12 +1,15 @@
 package workspace
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 )
@@ -39,6 +42,12 @@ type state struct {
 	Fingerprint string `json:"fingerprint,omitempty"`
 	// nil means the variable did not exist before sallyport touched it.
 	Saved map[string]*string `json:"saved"`
+	// Schema is a hash of this struct's wire layout, stamped by encodeState and
+	// checked by decodeState. It lets a new binary notice that a running shell's
+	// state was written by a different sallyport version (see stateSchema). It
+	// is metadata, not data, so it is excluded from the schema computation
+	// itself.
+	Schema string `json:"schema,omitempty"`
 }
 
 // ZshHook returns the shim for .zshrc. All logic stays in the binary; the
@@ -118,13 +127,20 @@ type ExportResult struct {
 func BuildExportScript(pwd string, quiet bool) (ExportResult, error) {
 	var warnings []string
 
-	st, err := decodeState(os.Getenv(stateEnvKey))
+	st, schemaMismatch, err := decodeState(os.Getenv(stateEnvKey))
 	if err != nil {
 		// Corruption is not silently absorbed: the saved originals are gone, so
 		// the user must know their pre-workspace environment can no longer be
 		// restored.
 		warnings = append(warnings, corruptStateWarning)
 		st = state{}
+	} else if schemaMismatch && !quiet {
+		// The state decoded but came from a different state layout; the recovered
+		// originals may be misread. We keep using them (best-effort), but say so.
+		// Gated on !quiet like the other prompt warnings, and self-healing: the
+		// first transition through encodeState re-stamps the current schema, so
+		// the warning stops on its own.
+		warnings = append(warnings, schemaMismatchWarning)
 	}
 
 	// zsh exports the logical $PWD, so entering through a symlink would
@@ -266,26 +282,69 @@ func findDirenvFile(dir string) string {
 // corruptStateWarning is surfaced when the encoded state cannot be decoded.
 const corruptStateWarning = "sallyport: " + stateEnvKey + " is corrupted; the pre-workspace environment cannot be restored"
 
-// decodeState parses the base64+JSON state blob. It is pure and returns the
-// error rather than acting on it: the empty string decodes to the zero state
-// ("no state"), which is also how the hook clears the state on leave, while a
-// genuine decode failure is the caller's to warn about.
-func decodeState(raw string) (state, error) {
+// schemaMismatchWarning is surfaced when a decoded state's schema does not
+// match this binary's. It self-heals: the next transition re-encodes the state
+// with the current schema, so the warning stops appearing after that.
+const schemaMismatchWarning = "sallyport: " + stateEnvKey + " was written by a different sallyport version; interpreting best-effort"
+
+// stateSchema is a short hash of the state struct's wire layout, computed once
+// at startup. json.Unmarshal never errors on a structural mismatch — it drops
+// unknown fields and zero-fills missing ones — so a change to the meaning or
+// type of a field would let a new binary silently misread state written by an
+// old one (the class of bug that bit shadowenv across 2.x->3.x). Stamping this
+// hash into every state and checking it on decode turns that silent
+// misinterpretation into an explicit best-effort warning.
+var stateSchema = func() string {
+	sum := sha256.Sum256([]byte(stateSchemaString()))
+	return hex.EncodeToString(sum[:])[:12]
+}()
+
+// stateSchemaString is the canonical description of the state wire layout: each
+// data field's JSON name paired with its normalized Go type, sorted so field
+// order (which JSON does not care about) is not mistaken for a change. The
+// Schema field itself is metadata and excluded. A golden test pins this string
+// so any edit to the state struct forces a compatibility decision.
+func stateSchemaString() string {
+	t := reflect.TypeOf(state{})
+	parts := make([]string, 0, t.NumField())
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		name := strings.Split(f.Tag.Get("json"), ",")[0]
+		if name == "schema" {
+			continue
+		}
+		parts = append(parts, name+":"+f.Type.String())
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
+}
+
+// decodeState parses the base64+JSON state blob. It is pure. The bool reports a
+// schema mismatch: the blob decoded, but its schema differs from this binary's
+// (or predates the schema field entirely), so the recovered originals may be
+// misread. The caller still uses the decoded state — Go ignores unknown fields
+// and zero-fills missing ones, so a wire-compatible change survives — but should
+// warn. The empty string is "no state" (also how the hook clears state on
+// leave) and never a mismatch; a genuine decode failure is returned as an error.
+func decodeState(raw string) (state, bool, error) {
 	if raw == "" {
-		return state{}, nil
+		return state{}, false, nil
 	}
 	data, err := base64.StdEncoding.DecodeString(raw)
 	if err != nil {
-		return state{}, err
+		return state{}, false, err
 	}
 	var s state
 	if err := json.Unmarshal(data, &s); err != nil {
-		return state{}, err
+		return state{}, false, err
 	}
-	return s, nil
+	return s, s.Schema != stateSchema, nil
 }
 
 func encodeState(s state) (string, error) {
+	// Stamp the current schema so a future binary can tell whether this state
+	// matches its own layout (see stateSchema).
+	s.Schema = stateSchema
 	data, err := json.Marshal(s)
 	if err != nil {
 		return "", err
