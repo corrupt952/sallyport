@@ -21,8 +21,8 @@ var ErrUntrusted = errors.New("config is not trusted")
 // no grant it holds can be trusted. This is what direnv #445 warns about.
 var ErrUnsafeTrustStore = errors.New("trust store is not secure")
 
-// Trust records approvals as sha256(config path + content), so any edit to an
-// approved config silently revokes the grant. Without this, cd-ing into a
+// Trust records approvals as sha256(config identity + content), so any edit to
+// an approved config silently revokes the grant. Without this, cd-ing into a
 // cloned repository would apply attacker-controlled env vars (PATH included).
 
 func trustDir() string {
@@ -34,24 +34,76 @@ func trustDir() string {
 	return filepath.Join(base, "sallyport", "trust")
 }
 
-// checkOwnerWritable rejects a path not owned by the current user or writable
-// by group or other. Those are precisely the conditions under which someone
-// else could substitute its contents between the moment a grant is recorded
-// (or verified) and the moment sallyport acts on it. The error carries the fix
-// so the user is not left guessing.
-func checkOwnerWritable(path string, fi os.FileInfo) error {
+// ownerUID reports the owning uid of fi; the bool is false when the platform's
+// Sys() is not the unix shape sallyport targets, in which case ownership cannot
+// be proven and callers must refuse.
+func ownerUID(fi os.FileInfo) (int, bool) {
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	if !ok {
-		// Non-unix Sys() shape: we cannot prove ownership, so we cannot vouch
-		// for the path. sallyport only targets unix shells, so this is a guard
-		// against the impossible rather than an expected path.
+		return 0, false
+	}
+	return int(st.Uid), true
+}
+
+// checkOwnerWritable rejects a path not owned by the current user or writable by
+// group or other. This is the strict form: it demands the user's own exclusive
+// ownership, used for the trust store, whose files (grants) sallyport itself
+// creates and no system component ever should.
+func checkOwnerWritable(path string, fi os.FileInfo) error {
+	uid, ok := ownerUID(fi)
+	if !ok {
 		return fmt.Errorf("%s: cannot determine owner", path)
 	}
-	if int(st.Uid) != os.Getuid() {
-		return fmt.Errorf("%s is owned by uid %d, not you (uid %d); chown it to yourself", path, st.Uid, os.Getuid())
+	if uid != os.Getuid() {
+		return fmt.Errorf("%s is owned by uid %d, not you (uid %d); chown it to yourself", path, uid, os.Getuid())
 	}
 	if fi.Mode().Perm()&0o022 != 0 {
 		return fmt.Errorf("%s is writable by others; run: chmod go-w %s", path, path)
+	}
+	return nil
+}
+
+// trustedOwner reports whether a config-side path owned by uid is acceptable:
+// the current user, or root. Root is implicitly trusted because only root can
+// replace a root-owned path, and system config managers (Nix/home-manager place
+// the config and its symlink target in the root-owned store) depend on this.
+// The trust store itself does not use this relaxation — see checkOwnerWritable.
+func trustedOwner(uid int) bool {
+	return uid == os.Getuid() || uid == 0
+}
+
+// checkConfigNode verifies a regular config file, a resolved symlink target, or
+// either of their parent directories: it must be owned by the user or root and
+// not writable by group or other, so only a trusted owner can change what
+// sallyport is about to read and approve.
+func checkConfigNode(path string) error {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	uid, ok := ownerUID(fi)
+	if !ok {
+		return fmt.Errorf("%s: cannot determine owner", path)
+	}
+	if !trustedOwner(uid) {
+		return fmt.Errorf("%s is owned by uid %d (neither you, uid %d, nor root); chown it to yourself", path, uid, os.Getuid())
+	}
+	if fi.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("%s is writable by others; run: chmod go-w %s", path, path)
+	}
+	return nil
+}
+
+// checkLinkOwner verifies a symlink node itself. Only ownership is checked: a
+// symlink's permission bits are ignored by the kernel, so they protect nothing;
+// what matters is that only a trusted owner (the user or root) can repoint it.
+func checkLinkOwner(path string, li os.FileInfo) error {
+	uid, ok := ownerUID(li)
+	if !ok {
+		return fmt.Errorf("%s: cannot determine owner", path)
+	}
+	if !trustedOwner(uid) {
+		return fmt.Errorf("%s is a symlink owned by uid %d (neither you, uid %d, nor root); chown it to yourself", path, uid, os.Getuid())
 	}
 	return nil
 }
@@ -75,26 +127,42 @@ func verifyTrustStore() error {
 	return checkOwnerWritable(dir, fi)
 }
 
-// verifyConfigPath rejects a config whose file or containing directory is owned
-// by someone else or writable by group/other. Either lets an attacker swap the
-// bytes a human reviewed for hostile ones around the moment of approval: a
-// writable file is rewritten in place, a writable parent is swapped by rename
-// even when the file itself is read-only. The grant is keyed by the reviewed
-// content, so both must be locked down before trusting.
-func verifyConfigPath(abs string) error {
-	fi, err := os.Stat(abs)
+// verifyConfigPath rejects a config an attacker could swap around the moment of
+// approval. A regular config is checked along with its parent directory (a
+// writable parent lets the file be replaced by rename even when it is
+// read-only). A symlinked config (Nix/home-manager) additionally has the link
+// node and the resolved target and the target's parent checked, so neither the
+// link nor its destination can be repointed or rewritten by an untrusted user.
+// Config-side ownership allows the user or root (see trustedOwner).
+func verifyConfigPath(path string) error {
+	abs, err := filepath.Abs(path)
 	if err != nil {
 		return err
 	}
-	if err := checkOwnerWritable(abs, fi); err != nil {
-		return err
-	}
-	parent := filepath.Dir(abs)
-	pfi, err := os.Stat(parent)
+	li, err := os.Lstat(abs)
 	if err != nil {
 		return err
 	}
-	return checkOwnerWritable(parent, pfi)
+	if li.Mode()&os.ModeSymlink != 0 {
+		if err := checkLinkOwner(abs, li); err != nil {
+			return err
+		}
+		if err := checkConfigNode(filepath.Dir(abs)); err != nil {
+			return err
+		}
+		target, err := filepath.EvalSymlinks(abs)
+		if err != nil {
+			return err
+		}
+		if err := checkConfigNode(target); err != nil {
+			return err
+		}
+		return checkConfigNode(filepath.Dir(target))
+	}
+	if err := checkConfigNode(abs); err != nil {
+		return err
+	}
+	return checkConfigNode(filepath.Dir(abs))
 }
 
 // canonical resolves path aliases (macOS /tmp -> /private/tmp, symlinked
@@ -111,16 +179,37 @@ func canonical(path string) (string, error) {
 	return abs, nil
 }
 
+// configIdentity is a config's logical location: the canonical directory it
+// lives in joined with its file name, with the final element deliberately NOT
+// symlink-resolved. A config deployed as a symlink (Nix/home-manager) is thus
+// identified by where it sits, not where its target happens to point, so a
+// store-path change across a rebuild keeps the same identity while an edit to
+// the pointed-at bytes still changes the fingerprint. The directory IS resolved,
+// so directory aliases (/tmp -> /private/tmp, a symlinked checkout) still map to
+// one identity. Reading through this path follows the final symlink, so content
+// hashing and parsing see the target's bytes.
+func configIdentity(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	dir, err := canonical(filepath.Dir(abs))
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, filepath.Base(abs)), nil
+}
+
 func fingerprint(path string) (string, error) {
-	abs, err := canonical(path)
+	id, err := configIdentity(path)
 	if err != nil {
 		return "", err
 	}
-	content, err := readConfigFile(abs)
+	content, err := readConfigFile(id)
 	if err != nil {
 		return "", err
 	}
-	return fingerprintBytes(abs, content), nil
+	return fingerprintBytes(id, content), nil
 }
 
 func fingerprintBytes(abs string, content []byte) string {
@@ -156,41 +245,42 @@ func LoadTrustedConfig(path string) (Config, string, error) {
 	if err := verifyTrustStore(); err != nil {
 		return Config{}, "", fmt.Errorf("%w: %v", ErrUnsafeTrustStore, err)
 	}
-	abs, err := canonical(path)
+	id, err := configIdentity(path)
 	if err != nil {
 		return Config{}, "", err
 	}
-	content, err := readConfigFile(abs)
+	content, err := readConfigFile(id)
 	if err != nil {
 		return Config{}, "", err
 	}
-	fp := fingerprintBytes(abs, content)
+	fp := fingerprintBytes(id, content)
 	if _, err := os.Stat(filepath.Join(trustDir(), fp)); err != nil {
 		return Config{}, "", ErrUntrusted
 	}
-	cfg, err := parseConfig(abs, content)
+	cfg, err := parseConfig(id, content)
 	return cfg, fp, err
 }
 
 func Trust(path string) error {
-	abs, err := canonical(path)
+	id, err := configIdentity(path)
 	if err != nil {
 		return err
 	}
 	// Reject a config someone else could swap between review and approval: the
-	// grant would then vouch for bytes the human never saw.
-	if err := verifyConfigPath(abs); err != nil {
+	// grant would then vouch for bytes the human never saw. Checks the link and
+	// its target when the config is a symlink (see verifyConfigPath).
+	if err := verifyConfigPath(path); err != nil {
 		return fmt.Errorf("refusing to trust: %w", err)
 	}
-	content, err := readConfigFile(abs)
+	content, err := readConfigFile(id)
 	if err != nil {
 		return err
 	}
 	// Fingerprint before parsing, the same order as LoadTrustedConfig.
-	fp := fingerprintBytes(abs, content)
+	fp := fingerprintBytes(id, content)
 	// Approving bytes that cannot be parsed would create a grant the export
 	// path can never use, and would warn on every cd instead of failing here.
-	if _, err := parseConfig(abs, content); err != nil {
+	if _, err := parseConfig(id, content); err != nil {
 		return fmt.Errorf("refusing to trust: %w", err)
 	}
 	// If the store already exists it must be secure before we add a grant to
@@ -201,36 +291,36 @@ func Trust(path string) error {
 	if err := os.MkdirAll(trustDir(), 0o700); err != nil {
 		return err
 	}
-	// The record's content is the config path, for humans inspecting the dir;
-	// lookups only ever use the filename. Written via rename: lookups test
+	// The record's content is the config identity, for humans inspecting the
+	// dir; lookups only ever use the filename. Written via rename: lookups test
 	// mere existence, so a crash mid-write must not leave an empty record
 	// behind that would pass as a valid grant.
 	record := filepath.Join(trustDir(), fp)
 	tmp := record + ".tmp"
-	if err := os.WriteFile(tmp, []byte(abs+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(tmp, []byte(id+"\n"), 0o600); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, record); err != nil {
 		return err
 	}
-	Ok("trusted %s", abs)
+	Ok("trusted %s", id)
 	return nil
 }
 
-// Untrust matches records by their recorded config path, not by a fingerprint
-// of the current content. A grant is keyed by sha256(path + content), so once
-// the config is edited the current fingerprint no longer names any record and
-// the stale grant for the original bytes would survive on disk, silently
-// reviving trust the moment the content is restored. Removing every record
-// whose recorded path is the target's canonical path revokes all of them,
-// including the one for the content presently on disk.
+// Untrust matches records by their recorded config identity, not by a
+// fingerprint of the current content. A grant is keyed by sha256(identity +
+// content), so once the config is edited the current fingerprint no longer names
+// any record and the stale grant for the original bytes would survive on disk,
+// silently reviving trust the moment the content is restored. Removing every
+// record whose recorded identity is the target's logical identity revokes all of
+// them, including the one for the content presently on disk.
 func Untrust(path string) error {
 	// Consistent with the other entry points: surface an insecure store rather
 	// than mutating it silently, so the user fixes it before relying on trust.
 	if err := verifyTrustStore(); err != nil {
 		return fmt.Errorf("refusing to untrust: %w", err)
 	}
-	target, err := canonical(path)
+	target, err := configIdentity(path)
 	if err != nil {
 		return err
 	}

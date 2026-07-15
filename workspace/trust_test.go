@@ -266,3 +266,160 @@ func TestCreateAutoTrusts(t *testing.T) {
 		t.Fatal("freshly created template is not trusted")
 	}
 }
+
+// symlinkConfig makes dir a workspace whose .sallyport.jsonc is a symlink to
+// target (written with content), the way Nix and home-manager deploy configs.
+// It returns the config path inside dir.
+func symlinkConfig(t *testing.T, dir, target, content string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := ConfigPath(dir)
+	if err := os.Symlink(target, cfg); err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+func TestTrustSymlinkedConfig(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	base := t.TempDir()
+	cfg := symlinkConfig(t, filepath.Join(base, "ws"), filepath.Join(base, "store", "config"), `{"env": {}}`)
+
+	if err := Trust(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !IsTrusted(cfg) {
+		t.Fatal("symlinked config not trusted after Trust")
+	}
+}
+
+func TestTrustSymlinkExpiresOnTargetEdit(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	base := t.TempDir()
+	target := filepath.Join(base, "store", "config")
+	cfg := symlinkConfig(t, filepath.Join(base, "ws"), target, `{"env": {}}`)
+	if err := Trust(cfg); err != nil {
+		t.Fatal(err)
+	}
+	// Rewriting the target's bytes changes the fingerprint, so the grant for the
+	// original content no longer matches: an edit through the link revokes trust.
+	if err := os.WriteFile(target, []byte(`{"env": {"ADDED": "x"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if IsTrusted(cfg) {
+		t.Error("trust survived a target content change")
+	}
+}
+
+func TestTrustSymlinkSurvivesTargetRepointSameContent(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	base := t.TempDir()
+	cfg := symlinkConfig(t, filepath.Join(base, "ws"), filepath.Join(base, "store-1", "config"), `{"env": {"A": "1"}}`)
+	if err := Trust(cfg); err != nil {
+		t.Fatal(err)
+	}
+	// A Nix rebuild lands identical content at a new store path and repoints the
+	// symlink. The identity is the logical location, not the target path, so the
+	// fingerprint is unchanged and trust must survive.
+	newTarget := filepath.Join(base, "store-2", "config")
+	if err := os.MkdirAll(filepath.Dir(newTarget), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newTarget, []byte(`{"env": {"A": "1"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(newTarget, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !IsTrusted(cfg) {
+		t.Error("trust lost across a store-path change with identical content")
+	}
+}
+
+func TestTrustSymlinkIdentityIsPerLocation(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	base := t.TempDir()
+	target := filepath.Join(base, "store", "config")
+	cfgA := symlinkConfig(t, filepath.Join(base, "a"), target, `{"env": {}}`)
+	// Workspace b links to the very same target file.
+	dirB := filepath.Join(base, "b")
+	if err := os.MkdirAll(dirB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgB := ConfigPath(dirB)
+	if err := os.Symlink(target, cfgB); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Trust(cfgA); err != nil {
+		t.Fatal(err)
+	}
+	if !IsTrusted(cfgA) {
+		t.Error("trusted workspace A reports untrusted")
+	}
+	if IsTrusted(cfgB) {
+		t.Error("trusting A also trusted B despite a different logical location")
+	}
+}
+
+func TestTrustDanglingSymlinkFails(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	base := t.TempDir()
+	dir := filepath.Join(base, "ws")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := ConfigPath(dir)
+	if err := os.Symlink(filepath.Join(base, "gone"), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := Trust(cfg); err == nil {
+		t.Error("Trust accepted a dangling symlink config")
+	}
+	if IsTrusted(cfg) {
+		t.Error("dangling symlink config reported trusted")
+	}
+}
+
+func TestTrustRefusesSymlinkTargetWritable(t *testing.T) {
+	skipIfRoot(t)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	base := t.TempDir()
+	target := filepath.Join(base, "store", "config")
+	cfg := symlinkConfig(t, filepath.Join(base, "ws"), target, `{"env": {}}`)
+	// A group/world-writable target lets an attacker rewrite the bytes the link
+	// resolves to after the human reviewed them.
+	if err := os.Chmod(target, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if err := Trust(cfg); err == nil {
+		t.Error("Trust accepted a symlink to a world-writable target")
+	}
+}
+
+func TestTrustRefusesSymlinkTargetParentWritable(t *testing.T) {
+	skipIfRoot(t)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	base := t.TempDir()
+	target := filepath.Join(base, "store", "config")
+	cfg := symlinkConfig(t, filepath.Join(base, "ws"), target, `{"env": {}}`)
+	// A writable target directory lets the target be swapped by rename even when
+	// the target file itself is read-only.
+	if err := os.Chmod(filepath.Dir(target), 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := Trust(cfg); err == nil {
+		t.Error("Trust accepted a symlink whose target directory is world-writable")
+	}
+}

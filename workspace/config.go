@@ -45,13 +45,17 @@ type EnvVar struct {
 var keyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // FindRoot returns the nearest ancestor of dir containing .sallyport.jsonc, or "".
-// Only a regular file counts: a symlinked .sallyport.jsonc inside an untrusted
-// checkout could point at an arbitrary file (a private key, say) and sallyport must
-// not follow it.
+// The name must resolve to a regular file: either a regular file directly, or a
+// symlink to one (Nix and home-manager deploy configs as symlinks into a
+// read-only store). Symlinks are followed to regular files only — a link to a
+// directory, a device, or a dangling target does not mark a workspace. Following
+// is safe because a config's identity is its logical location, not its target
+// (see configIdentity), and nothing in a config is ever applied without a trust
+// grant, so a hostile link cannot smuggle env vars in.
 func FindRoot(dir string) string {
 	d := filepath.Clean(dir)
 	for {
-		if fi, err := os.Lstat(filepath.Join(d, ConfigFileName)); err == nil && fi.Mode().IsRegular() {
+		if fi, err := os.Stat(filepath.Join(d, ConfigFileName)); err == nil && fi.Mode().IsRegular() {
 			return d
 		}
 		parent := filepath.Dir(d)

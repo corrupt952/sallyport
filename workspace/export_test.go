@@ -360,6 +360,44 @@ func TestExportSymlinkedPwdMatchesCanonical(t *testing.T) {
 	}
 }
 
+// A config deployed as a symlink (Nix/home-manager) must be discovered,
+// trusted, and applied end-to-end exactly like a regular-file config.
+func TestExportAppliesSymlinkedConfig(t *testing.T) {
+	t.Setenv(stateEnvKey, "")
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	base := t.TempDir()
+	root := filepath.Join(base, "ws")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// State roots are canonical (macOS symlinks TMPDIR), so canonicalize the
+	// expected root the same way BuildExportScript will.
+	if c, err := filepath.EvalSymlinks(root); err == nil {
+		root = c
+	}
+	target := filepath.Join(base, "store", "config")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte(`{"env": {"OP_ACCOUNT": "sym.example.com"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, ConfigPath(root)); err != nil {
+		t.Fatal(err)
+	}
+	if err := Trust(ConfigPath(root)); err != nil {
+		t.Fatal(err)
+	}
+
+	script := mustBuild(t, root, false)
+	if !strings.Contains(script, "export OP_ACCOUNT='sym.example.com'") {
+		t.Errorf("symlinked config was not applied:\n%s", script)
+	}
+	if st := stateFromScript(t, script); st.Root != root {
+		t.Errorf("state root = %q, want %q", st.Root, root)
+	}
+}
+
 // An edit that gets re-trusted between two prompts must reapply: only the
 // fingerprint distinguishes it, because the root never changed and the
 // untrusted intermediate state is never observed.

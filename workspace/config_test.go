@@ -148,22 +148,48 @@ func TestFindRoot(t *testing.T) {
 	}
 }
 
-func TestFindRootIgnoresSymlinkedConfig(t *testing.T) {
+// A .sallyport.jsonc symlinked to a regular file marks a workspace: Nix and
+// home-manager deploy configs as symlinks into a read-only store. A symlink to
+// a directory or a dangling symlink does not resolve to a regular file, so
+// neither names a config.
+func TestFindRootFollowsSymlinkToRegularFile(t *testing.T) {
 	base := t.TempDir()
-	root := filepath.Join(base, "demo")
-	if err := os.MkdirAll(root, 0o755); err != nil {
+
+	regRoot := filepath.Join(base, "regular")
+	if err := os.MkdirAll(regRoot, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	target := filepath.Join(base, "elsewhere")
+	target := filepath.Join(base, "store-config")
 	if err := os.WriteFile(target, []byte(`{"env": {}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(target, filepath.Join(root, ConfigFileName)); err != nil {
+	if err := os.Symlink(target, filepath.Join(regRoot, ConfigFileName)); err != nil {
 		t.Fatal(err)
 	}
+	if got := FindRoot(regRoot); got != regRoot {
+		t.Errorf("symlink to regular file: FindRoot = %q, want %q", got, regRoot)
+	}
 
-	if got := FindRoot(root); got != "" {
-		t.Errorf("FindRoot followed a symlinked config: %q", got)
+	dirRoot := filepath.Join(base, "todir")
+	if err := os.MkdirAll(dirRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(base, filepath.Join(dirRoot, ConfigFileName)); err != nil {
+		t.Fatal(err)
+	}
+	if got := FindRoot(dirRoot); got != "" {
+		t.Errorf("symlink to directory: FindRoot = %q, want empty", got)
+	}
+
+	danglingRoot := filepath.Join(base, "dangling")
+	if err := os.MkdirAll(danglingRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(base, "does-not-exist"), filepath.Join(danglingRoot, ConfigFileName)); err != nil {
+		t.Fatal(err)
+	}
+	if got := FindRoot(danglingRoot); got != "" {
+		t.Errorf("dangling symlink: FindRoot = %q, want empty", got)
 	}
 }
 
