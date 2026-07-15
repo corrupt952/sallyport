@@ -70,6 +70,48 @@ func setState(t *testing.T, s state) {
 	t.Setenv(stateEnvKey, encoded)
 }
 
+// mustBuild runs BuildExportScript, fails on error, and returns the script.
+// The warning-gating tests call BuildExportScript directly to inspect Warnings.
+func mustBuild(t *testing.T, pwd string, quiet bool) string {
+	t.Helper()
+	res, err := BuildExportScript(pwd, quiet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res.Script
+}
+
+// hasWarning reports whether any warning contains substr.
+func hasWarning(warnings []string, substr string) bool {
+	for _, w := range warnings {
+		if strings.Contains(w, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// forgeGrant writes a trust record for root's config bytes directly, bypassing
+// Trust's parse check to simulate bytes approved by an older version with
+// different parse rules.
+func forgeGrant(t *testing.T, root string) {
+	t.Helper()
+	abs, err := filepath.Abs(ConfigPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(abs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(trustDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(trustDir(), fingerprintBytes(abs, content)), []byte(abs+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestExportEnterSavesOriginals(t *testing.T) {
 	t.Setenv(stateEnvKey, "")
 	t.Setenv("SSH_AUTH_SOCK", "/original/agent.sock")
@@ -77,10 +119,7 @@ func TestExportEnterSavesOriginals(t *testing.T) {
 	os.Unsetenv("WORKSPACE_PATH")
 	root := newWorkspaceDir(t, `{"env": {"SSH_AUTH_SOCK": "/1password/agent.sock"}}`)
 
-	script, err := BuildExportScript(root, false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	script := mustBuild(t, root, false)
 	for _, want := range []string{
 		"export WORKSPACE_PATH='" + root + "'",
 		`export SSH_AUTH_SOCK="/1password/agent.sock"`,
@@ -119,10 +158,7 @@ func TestExportNoopWithinSameWorkspace(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "repo", "sub"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	script, err := BuildExportScript(filepath.Join(root, "repo", "sub"), false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	script := mustBuild(t, filepath.Join(root, "repo", "sub"), false)
 	if script != "" {
 		t.Errorf("expected empty script, got:\n%s", script)
 	}
@@ -138,10 +174,7 @@ func TestExportLeaveRestoresOriginals(t *testing.T) {
 		},
 	})
 
-	script, err := BuildExportScript(t.TempDir(), false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	script := mustBuild(t, t.TempDir(), false)
 	for _, want := range []string{
 		"export SSH_AUTH_SOCK='/original/agent.sock'",
 		"unset WORKSPACE_PATH",
@@ -159,10 +192,7 @@ func TestExportSwitchKeepsPreWorkspaceOriginals(t *testing.T) {
 	rootA := newWorkspaceDir(t, `{"env": {"SSH_AUTH_SOCK": "/a/agent.sock"}}`)
 	rootB := newWorkspaceDir(t, `{"env": {"SSH_AUTH_SOCK": "/b/agent.sock"}}`)
 
-	enterA, err := BuildExportScript(rootA, false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	enterA := mustBuild(t, rootA, false)
 	stA := stateFromScript(t, enterA)
 
 	// Simulate the shell having applied workspace a.
@@ -170,10 +200,7 @@ func TestExportSwitchKeepsPreWorkspaceOriginals(t *testing.T) {
 	t.Setenv("SSH_AUTH_SOCK", "/a/agent.sock")
 	t.Setenv("WORKSPACE_PATH", rootA)
 
-	enterB, err := BuildExportScript(rootB, false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	enterB := mustBuild(t, rootB, false)
 	if !strings.Contains(enterB, `export SSH_AUTH_SOCK="/b/agent.sock"`) {
 		t.Errorf("switch does not apply workspace b:\n%s", enterB)
 	}
@@ -188,25 +215,9 @@ func TestExportIgnoresBrokenConfig(t *testing.T) {
 	root := newUntrustedWorkspaceDir(t, `{"env": {"$(whoami)": "x"}}`)
 	// Trust refuses unparseable configs, so forge the grant directly to
 	// simulate bytes approved by an older version with different parse rules.
-	abs, err := filepath.Abs(ConfigPath(root))
-	if err != nil {
-		t.Fatal(err)
-	}
-	content, err := os.ReadFile(abs)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(trustDir(), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(trustDir(), fingerprintBytes(abs, content)), []byte(abs+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	forgeGrant(t, root)
 
-	script, err := BuildExportScript(root, false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	script := mustBuild(t, root, false)
 	if strings.Contains(script, "whoami") {
 		t.Errorf("broken config leaked into eval'd output:\n%s", script)
 	}
@@ -222,10 +233,7 @@ func TestExportSkipsUntrustedConfig(t *testing.T) {
 	root := newUntrustedWorkspaceDir(t, `{"env": {"SSH_AUTH_SOCK": "/evil/agent.sock"}}`)
 	setState(t, state{Root: "/previous/demo", Saved: map[string]*string{"SSH_AUTH_SOCK": &orig}})
 
-	script, err := BuildExportScript(root, false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	script := mustBuild(t, root, false)
 	if strings.Contains(script, "evil") {
 		t.Errorf("untrusted config was applied:\n%s", script)
 	}
@@ -245,10 +253,7 @@ func TestExportTrustExpiresOnEdit(t *testing.T) {
 	root := newWorkspaceDir(t, `{"env": {"OP_ACCOUNT": "good"}}`)
 	writeConfig(t, root, `{"env": {"OP_ACCOUNT": "tampered"}}`)
 
-	script, err := BuildExportScript(root, false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	script := mustBuild(t, root, false)
 	if strings.Contains(script, "tampered") {
 		t.Errorf("edited config kept its trust grant:\n%s", script)
 	}
@@ -263,10 +268,7 @@ func TestExportUntrustInPlaceRollsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Same pwd, no cd: revocation must roll the environment back anyway.
-	script, err := BuildExportScript(root, true)
-	if err != nil {
-		t.Fatal(err)
-	}
+	script := mustBuild(t, root, true)
 	for _, want := range []string{
 		"export SSH_AUTH_SOCK='/original/agent.sock'",
 		"typeset -g " + stateShellVar + "=''",
@@ -281,10 +283,7 @@ func TestExportTrustInPlaceApplies(t *testing.T) {
 	t.Setenv(stateEnvKey, "")
 	root := newUntrustedWorkspaceDir(t, `{"env": {"OP_ACCOUNT": "late.example.com"}}`)
 
-	script, err := BuildExportScript(root, true)
-	if err != nil {
-		t.Fatal(err)
-	}
+	script := mustBuild(t, root, true)
 	if strings.Contains(script, "late.example.com") {
 		t.Fatalf("applied before trust:\n%s", script)
 	}
@@ -293,10 +292,7 @@ func TestExportTrustInPlaceApplies(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Same pwd, no cd: the very next evaluation must apply the workspace.
-	script, err = BuildExportScript(root, true)
-	if err != nil {
-		t.Fatal(err)
-	}
+	script = mustBuild(t, root, true)
 	if !strings.Contains(script, `export OP_ACCOUNT="late.example.com"`) {
 		t.Errorf("trust did not take effect without a cd:\n%s", script)
 	}
@@ -346,10 +342,7 @@ func TestExportSymlinkedPwdMatchesCanonical(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	script, err := BuildExportScript(link, false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	script := mustBuild(t, link, false)
 	if !strings.Contains(script, `export OP_ACCOUNT="alias.example.com"`) {
 		t.Fatalf("symlinked entry did not apply:\n%s", script)
 	}
@@ -360,10 +353,7 @@ func TestExportSymlinkedPwdMatchesCanonical(t *testing.T) {
 
 	// Moving to the canonical path afterwards must be a no-op.
 	setState(t, st)
-	script, err = BuildExportScript(root, false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	script = mustBuild(t, root, false)
 	if script != "" {
 		t.Errorf("alias switch caused churn:\n%s", script)
 	}
@@ -376,20 +366,14 @@ func TestExportReappliesAfterEditAndRetrust(t *testing.T) {
 	t.Setenv(stateEnvKey, "")
 	root := newWorkspaceDir(t, `{"env": {"FOO": "old"}}`)
 
-	enter, err := BuildExportScript(root, true)
-	if err != nil {
-		t.Fatal(err)
-	}
+	enter := mustBuild(t, root, true)
 	setState(t, stateFromScript(t, enter))
 
 	writeConfig(t, root, `{"env": {"FOO": "new"}}`)
 	if err := Trust(ConfigPath(root)); err != nil {
 		t.Fatal(err)
 	}
-	script, err := BuildExportScript(root, true)
-	if err != nil {
-		t.Fatal(err)
-	}
+	script := mustBuild(t, root, true)
 	if !strings.Contains(script, `export FOO="new"`) {
 		t.Errorf("edited and re-trusted config did not reapply:\n%s", script)
 	}
@@ -405,10 +389,7 @@ func TestExportConfigValuesExpandInShell(t *testing.T) {
 	t.Setenv(stateEnvKey, "")
 	root := newWorkspaceDir(t, `{"env": {"HOGE": "$HOME/fuga"}}`)
 
-	script, err := BuildExportScript(root, false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	script := mustBuild(t, root, false)
 	if !strings.Contains(script, `export HOGE="$HOME/fuga"`) {
 		t.Errorf("config value not emitted as shell-expandable source:\n%s", script)
 	}
@@ -443,10 +424,7 @@ func TestExportCommitsStateLast(t *testing.T) {
 	t.Setenv(stateEnvKey, "")
 	root := newWorkspaceDir(t, `{"env": {"SSH_AUTH_SOCK": "/1password/agent.sock"}}`)
 
-	script, err := BuildExportScript(root, false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	script := mustBuild(t, root, false)
 	lines := strings.Split(strings.TrimRight(script, "\n"), "\n")
 	if last := lines[len(lines)-1]; !strings.HasPrefix(last, "typeset -g "+stateShellVar+"=") {
 		t.Errorf("state is not committed last: %q", last)
@@ -460,20 +438,14 @@ func TestExportNeverExportsState(t *testing.T) {
 	t.Setenv(stateEnvKey, "")
 	root := newWorkspaceDir(t, `{"env": {"SSH_AUTH_SOCK": "/1password/agent.sock"}}`)
 
-	enterScript, err := BuildExportScript(root, false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	enterScript := mustBuild(t, root, false)
 	if strings.Contains(enterScript, "export "+stateEnvKey) {
 		t.Errorf("state was exported on enter:\n%s", enterScript)
 	}
 
 	st := stateFromScript(t, enterScript)
 	setState(t, st)
-	leaveScript, err := BuildExportScript(t.TempDir(), false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	leaveScript := mustBuild(t, t.TempDir(), false)
 	if strings.Contains(leaveScript, "export "+stateEnvKey) {
 		t.Errorf("state was exported on leave:\n%s", leaveScript)
 	}
@@ -487,10 +459,7 @@ func TestExportLeaveClearsStateWithoutUnset(t *testing.T) {
 	orig := "/original/agent.sock"
 	setState(t, state{Root: "/somewhere/demo", Saved: map[string]*string{"SSH_AUTH_SOCK": &orig}})
 
-	script, err := BuildExportScript(t.TempDir(), false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	script := mustBuild(t, t.TempDir(), false)
 	if strings.Contains(script, "unset "+stateShellVar) {
 		t.Errorf("leave unsets the state global; nounset would break the hook:\n%s", script)
 	}
@@ -580,6 +549,199 @@ print "nounset-ok"
 	// The hook must complete under nounset with an empty state global.
 	if !strings.Contains(got, "nounset-ok") {
 		t.Errorf("hook aborted under nounset:\n%s", got)
+	}
+}
+
+// The untrusted warning is silenced on quiet (per-prompt) calls unless the
+// workspace being rolled back is the one currently applied, in which case a
+// silent rollback would confuse the user.
+func TestExportUntrustedWarningGating(t *testing.T) {
+	root := newUntrustedWorkspaceDir(t, `{"env": {"OP_ACCOUNT": "x"}}`)
+
+	t.Setenv(stateEnvKey, "")
+	res, err := BuildExportScript(root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasWarning(res.Warnings, "is not trusted") {
+		t.Errorf("expected untrusted warning when not quiet: %v", res.Warnings)
+	}
+
+	// Quiet, and the applied workspace is elsewhere: stay silent.
+	setState(t, state{Root: "/somewhere/else"})
+	res, err = BuildExportScript(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasWarning(res.Warnings, "is not trusted") {
+		t.Errorf("untrusted warning should be suppressed under quiet away from the applied root: %v", res.Warnings)
+	}
+
+	// Quiet, but this very workspace was applied (trust revoked in place):
+	// force the warning, since the environment is being rolled back.
+	setState(t, state{Root: root})
+	res, err = BuildExportScript(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasWarning(res.Warnings, "is not trusted") {
+		t.Errorf("untrusted warning must be forced when the applied workspace was revoked: %v", res.Warnings)
+	}
+}
+
+func TestExportBrokenConfigWarningGating(t *testing.T) {
+	root := newUntrustedWorkspaceDir(t, `{"env": {"$(whoami)": "x"}}`)
+	forgeGrant(t, root)
+
+	t.Setenv(stateEnvKey, "")
+	res, err := BuildExportScript(root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasWarning(res.Warnings, "ignoring broken") {
+		t.Errorf("expected broken-config warning when not quiet: %v", res.Warnings)
+	}
+
+	res, err = BuildExportScript(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasWarning(res.Warnings, "ignoring broken") {
+		t.Errorf("broken-config warning should be suppressed under quiet: %v", res.Warnings)
+	}
+}
+
+func TestExportDirenvCoexistenceWarningGating(t *testing.T) {
+	t.Setenv(stateEnvKey, "")
+	root := newWorkspaceDir(t, `{"env": {"OP_ACCOUNT": "x"}}`)
+	if err := os.WriteFile(filepath.Join(root, ".envrc"), []byte("export A=1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := BuildExportScript(root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasWarning(res.Warnings, "managed by direnv") {
+		t.Errorf("expected direnv coexistence warning when not quiet: %v", res.Warnings)
+	}
+
+	res, err = BuildExportScript(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasWarning(res.Warnings, "managed by direnv") {
+		t.Errorf("direnv warning should be suppressed under quiet: %v", res.Warnings)
+	}
+}
+
+func TestExportCorruptStateWarns(t *testing.T) {
+	// A value that is not valid base64 cannot be decoded.
+	t.Setenv(stateEnvKey, "!!!not-base64!!!")
+	res, err := BuildExportScript(t.TempDir(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasWarning(res.Warnings, "is corrupted") {
+		t.Errorf("expected corrupt-state warning: %v", res.Warnings)
+	}
+}
+
+func TestDecodeState(t *testing.T) {
+	// The empty string is "no state", the same value the hook writes on leave.
+	if s, err := decodeState(""); err != nil || s.Root != "" {
+		t.Errorf("empty string: state=%v err=%v, want zero state and nil", s, err)
+	}
+	enc, err := encodeState(state{Root: "/x", Fingerprint: "fp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s, err := decodeState(enc); err != nil || s.Root != "/x" || s.Fingerprint != "fp" {
+		t.Errorf("roundtrip: state=%v err=%v", s, err)
+	}
+	if _, err := decodeState("@@@not-base64"); err == nil {
+		t.Error("invalid base64 accepted, want error")
+	}
+	notJSON := base64.StdEncoding.EncodeToString([]byte("not json"))
+	if _, err := decodeState(notJSON); err == nil {
+		t.Error("valid base64 but invalid JSON accepted, want error")
+	}
+}
+
+// renderScript is pure, so it can be exercised directly: restores precede
+// applies, literals are single-quoted while config values stay verbatim
+// double-quoted source, and the state line is always last.
+func TestRenderScript(t *testing.T) {
+	orig := "/old/sock"
+	saved := map[string]*string{"KEEP": &orig, "GONE": nil}
+	vars := []EnvVar{
+		{Key: "APPLIED", Val: "$HOME/x"},
+		{Key: "LIT", Val: "/real/path", Literal: true},
+	}
+	stateLine := "typeset -g " + stateShellVar + "='ENC'\n"
+	script := renderScript(saved, vars, stateLine)
+
+	for _, want := range []string{
+		"export KEEP='/old/sock'",
+		"unset GONE",
+		`export APPLIED="$HOME/x"`,
+		"export LIT='/real/path'",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("rendered script missing %q:\n%s", want, script)
+		}
+	}
+	if strings.Index(script, "KEEP") > strings.Index(script, "APPLIED") {
+		t.Errorf("restores not emitted before applies:\n%s", script)
+	}
+	lines := strings.Split(strings.TrimRight(script, "\n"), "\n")
+	if last := lines[len(lines)-1]; last != strings.TrimRight(stateLine, "\n") {
+		t.Errorf("state line not last: %q", last)
+	}
+}
+
+// End-to-end: the generated enter/leave scripts must actually eval in zsh,
+// applying literal values, expanding config values, and restoring on leave.
+func TestExportScriptEvalsInZsh(t *testing.T) {
+	zsh, err := exec.LookPath("zsh")
+	if err != nil {
+		t.Skip("zsh not available")
+	}
+	t.Setenv(stateEnvKey, "")
+	// The applied vars must have no prior value so leaving unsets them.
+	os.Unsetenv("OP_ACCOUNT")
+	os.Unsetenv("HOGE")
+	os.Unsetenv("WORKSPACE_PATH")
+	root := newWorkspaceDir(t, `{"env": {"OP_ACCOUNT": "acct.example.com", "HOGE": "$HOME/fuga"}}`)
+
+	enter := mustBuild(t, root, false)
+	// Simulate the shell having applied the workspace, then leave it.
+	setState(t, stateFromScript(t, enter))
+	leave := mustBuild(t, t.TempDir(), false)
+
+	script := "HOME=/sallyport-home\n" + enter + `
+printf 'OP=%s\n' "$OP_ACCOUNT"
+printf 'HOGE=%s\n' "$HOGE"
+printf 'WS=%s\n' "$WORKSPACE_PATH"
+` + leave + `
+printf 'OP_after=%s\n' "${OP_ACCOUNT-<unset>}"
+printf 'WS_after=%s\n' "${WORKSPACE_PATH-<unset>}"
+`
+	out, err := exec.Command(zsh, "-c", script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("zsh run failed: %v\n%s", err, out)
+	}
+	got := string(out)
+	for _, want := range []string{
+		"OP=acct.example.com",       // literal config value applied
+		"HOGE=/sallyport-home/fuga", // $HOME expanded by the shell
+		"WS=" + root,                // automatic WORKSPACE_PATH
+		"OP_after=<unset>",          // restored to its pre-workspace absence
+		"WS_after=<unset>",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("zsh output missing %q:\n%s", want, got)
+		}
 	}
 }
 

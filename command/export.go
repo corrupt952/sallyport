@@ -34,10 +34,15 @@ func (c *ExportCommand) Execute(_ context.Context, f *flag.FlagSet, _ ...interfa
 	if err != nil {
 		return fail(err)
 	}
-	script, err := workspace.BuildExportScript(pwd, c.quiet)
+	result, err := workspace.BuildExportScript(pwd, c.quiet)
 	if err != nil {
 		return fail(err)
 	}
-	fmt.Print(script)
+	// Warnings go to stderr so they never contaminate the script the shell
+	// evals from stdout.
+	for _, w := range result.Warnings {
+		fmt.Fprintln(os.Stderr, w)
+	}
+	fmt.Print(result.Script)
 	return subcommands.ExitSuccess
 }

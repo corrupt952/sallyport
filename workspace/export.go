@@ -12,7 +12,7 @@ import (
 )
 
 // stateEnvKey is the environment variable the binary reads its state from
-// (loadState). The shell never exports it: it keeps the encoded value in
+// (decodeState). The shell never exports it: it keeps the encoded value in
 // stateShellVar, a non-exported global, and the hook passes it in as this
 // env var only for the single invocation that calls the binary. Nothing
 // else ever sees it, so it cannot leak into child processes.
@@ -100,10 +100,33 @@ fi
 `, stateShellVar, stateEnvKey, self), nil
 }
 
-// BuildExportScript emits the env diff for pwd; no change emits nothing.
-// quiet suppresses the untrusted warning for the per-prompt (precmd) calls.
-func BuildExportScript(pwd string, quiet bool) (string, error) {
-	st := loadState()
+// ExportResult is the outcome of evaluating a directory: the shell script to
+// eval and any human-facing warnings. Warnings are returned as data, not
+// written to a stream, so the CLI decides where they go (stderr) and tests can
+// assert on them directly without capturing output. An empty Script means no
+// transition was needed.
+type ExportResult struct {
+	Script   string
+	Warnings []string
+}
+
+// BuildExportScript emits the env diff for pwd; no change emits an empty
+// script. quiet suppresses the informational warnings for the per-prompt
+// (precmd) calls. It reads the state from the environment and the config from
+// disk, but performs no output of its own: the script and warnings come back
+// as data.
+func BuildExportScript(pwd string, quiet bool) (ExportResult, error) {
+	var warnings []string
+
+	st, err := decodeState(os.Getenv(stateEnvKey))
+	if err != nil {
+		// Corruption is not silently absorbed: the saved originals are gone, so
+		// the user must know their pre-workspace environment can no longer be
+		// restored.
+		warnings = append(warnings, corruptStateWarning)
+		st = state{}
+	}
+
 	// zsh exports the logical $PWD, so entering through a symlink would
 	// otherwise record a state root that never matches the canonical one.
 	if c, err := canonical(pwd); err == nil {
@@ -122,15 +145,14 @@ func BuildExportScript(pwd string, quiet bool) (string, error) {
 			// while the workspace is applied — a silent rollback of the
 			// user's environment would be confusing.
 			if !quiet || root == st.Root {
-				fmt.Fprintf(os.Stderr, "sallyport: %s is not trusted; run `sallyport trust` inside it\n", ConfigPath(root))
+				warnings = append(warnings, fmt.Sprintf("sallyport: %s is not trusted; run `sallyport trust` inside it", ConfigPath(root)))
 			}
 			root = ""
 		case err != nil:
-			// Stdout is eval'd by the shell, so the error goes to stderr and
-			// the transition is still recorded; failing here instead would
-			// re-trigger the error on every cd inside the workspace.
+			// The transition is still recorded so the hook does not re-trigger
+			// the error on every cd inside the workspace.
 			if !quiet {
-				fmt.Fprintf(os.Stderr, "sallyport: ignoring broken %s in %s: %v\n", ConfigFileName, root, err)
+				warnings = append(warnings, fmt.Sprintf("sallyport: ignoring broken %s in %s: %v", ConfigFileName, root, err))
 			}
 		default:
 			vars = WorkspaceVars(root, cfg)
@@ -139,7 +161,7 @@ func BuildExportScript(pwd string, quiet bool) (string, error) {
 			// over shared variables non-deterministically; make coexistence
 			// visible instead of mysterious.
 			if envrc := findDirenvFile(root); envrc != "" && !quiet {
-				fmt.Fprintf(os.Stderr, "sallyport: %s is also managed by direnv (%s); shared variables will conflict\n", root, envrc)
+				warnings = append(warnings, fmt.Sprintf("sallyport: %s is also managed by direnv (%s); shared variables will conflict", root, envrc))
 			}
 		}
 	}
@@ -149,38 +171,68 @@ func BuildExportScript(pwd string, quiet bool) (string, error) {
 	// fingerprint participates so an edited-and-retrusted config reapplies
 	// even though the root never changed.
 	if root == st.Root && fp == st.Fingerprint {
-		return "", nil
+		return ExportResult{Warnings: warnings}, nil
 	}
 
+	stateLine := fmt.Sprintf("typeset -g %s=''\n", stateShellVar)
+	if root != "" {
+		encoded, err := encodeState(state{Root: root, Fingerprint: fp, Saved: captureSaved(st, vars)})
+		if err != nil {
+			return ExportResult{}, err
+		}
+		// typeset -g, not export: this eval runs inside _sallyport_hook, so a
+		// plain assignment would be scoped to the function. The state itself
+		// must stay non-exported (see stateShellVar).
+		stateLine = fmt.Sprintf("typeset -g %s=%s\n", stateShellVar, zshQuote(encoded))
+	}
+
+	return ExportResult{Script: renderScript(st.Saved, vars, stateLine), Warnings: warnings}, nil
+}
+
+// captureSaved records, for each variable about to be applied, the value that
+// leaving the workspace must restore: the pre-sallyport original (already held
+// in st when switching workspaces) or the current environment value, or nil
+// when the variable is currently unset. The recorded original must predate
+// sallyport entirely, which is why a hit in st.Saved wins over the live env.
+func captureSaved(st state, vars []EnvVar) map[string]*string {
+	saved := map[string]*string{}
+	for _, v := range vars {
+		if orig, hit := st.Saved[v.Key]; hit {
+			saved[v.Key] = orig
+		} else if cur, exists := os.LookupEnv(v.Key); exists {
+			c := cur
+			saved[v.Key] = &c
+		} else {
+			saved[v.Key] = nil
+		}
+	}
+	return saved
+}
+
+// renderScript is pure: given the originals to restore, the variables to apply,
+// and the pre-built state-commit line, it always produces the same bytes.
+// Restores are emitted before applies so a workspace-to-workspace switch ends
+// with the new workspace's values for overlapping keys. stateLine is emitted
+// last: if the process dies mid-write, the shell evals a script whose state was
+// never committed, and the next evaluation redoes the whole idempotent
+// transition.
+func renderScript(saved map[string]*string, vars []EnvVar, stateLine string) string {
 	var b strings.Builder
 
-	// Restores are emitted before applies so a workspace-to-workspace switch
-	// ends with the new workspace's values for overlapping keys.
-	restoreKeys := make([]string, 0, len(st.Saved))
-	for k := range st.Saved {
+	restoreKeys := make([]string, 0, len(saved))
+	for k := range saved {
 		restoreKeys = append(restoreKeys, k)
 	}
 	sort.Strings(restoreKeys)
 	for _, k := range restoreKeys {
-		if old := st.Saved[k]; old != nil {
+		if old := saved[k]; old != nil {
 			fmt.Fprintf(&b, "export %s=%s\n", k, zshQuote(*old))
 		} else {
 			fmt.Fprintf(&b, "unset %s\n", k)
 		}
 	}
 
-	newSaved := map[string]*string{}
 	for _, v := range vars {
-		// The recorded original must predate sallyport entirely; when switching
-		// between workspaces the previous state already holds it.
-		if orig, hit := st.Saved[v.Key]; hit {
-			newSaved[v.Key] = orig
-		} else if cur, exists := os.LookupEnv(v.Key); exists {
-			c := cur
-			newSaved[v.Key] = &c
-		} else {
-			newSaved[v.Key] = nil
-		}
 		if v.Literal {
 			fmt.Fprintf(&b, "export %s=%s\n", v.Key, zshQuote(v.Val))
 		} else {
@@ -191,23 +243,8 @@ func BuildExportScript(pwd string, quiet bool) (string, error) {
 		}
 	}
 
-	if root == "" {
-		// Assign '' rather than unset: under `setopt nounset` a later
-		// "${__sallyport_state}" reference to an unset global aborts the hook
-		// with `parameter not set`, stopping it permanently. loadState already
-		// treats the empty string as "no state".
-		fmt.Fprintf(&b, "typeset -g %s=''\n", stateShellVar)
-	} else {
-		encoded, err := encodeState(state{Root: root, Fingerprint: fp, Saved: newSaved})
-		if err != nil {
-			return "", err
-		}
-		// typeset -g, not export: this eval runs inside _sallyport_hook, so a
-		// plain assignment would be scoped to the function. The state itself
-		// must stay non-exported (see stateShellVar).
-		fmt.Fprintf(&b, "typeset -g %s=%s\n", stateShellVar, zshQuote(encoded))
-	}
-	return b.String(), nil
+	b.WriteString(stateLine)
+	return b.String()
 }
 
 // findDirenvFile returns the nearest .envrc at root or above, or "".
@@ -226,28 +263,26 @@ func findDirenvFile(dir string) string {
 	}
 }
 
-func loadState() state {
-	raw := os.Getenv(stateEnvKey)
+// corruptStateWarning is surfaced when the encoded state cannot be decoded.
+const corruptStateWarning = "sallyport: " + stateEnvKey + " is corrupted; the pre-workspace environment cannot be restored"
+
+// decodeState parses the base64+JSON state blob. It is pure and returns the
+// error rather than acting on it: the empty string decodes to the zero state
+// ("no state"), which is also how the hook clears the state on leave, while a
+// genuine decode failure is the caller's to warn about.
+func decodeState(raw string) (state, error) {
 	if raw == "" {
-		return state{}
+		return state{}, nil
 	}
 	data, err := base64.StdEncoding.DecodeString(raw)
 	if err != nil {
-		warnCorruptState()
-		return state{}
+		return state{}, err
 	}
 	var s state
 	if err := json.Unmarshal(data, &s); err != nil {
-		warnCorruptState()
-		return state{}
+		return state{}, err
 	}
-	return s
-}
-
-// Corruption is not silently absorbed: the saved originals are gone, so the
-// user must know their pre-workspace environment can no longer be restored.
-func warnCorruptState() {
-	fmt.Fprintf(os.Stderr, "sallyport: %s is corrupted; the pre-workspace environment cannot be restored\n", stateEnvKey)
+	return s, nil
 }
 
 func encodeState(s state) (string, error) {
