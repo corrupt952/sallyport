@@ -75,7 +75,9 @@ func trustedOwner(uid int) bool {
 // checkConfigNode verifies a regular config file, a resolved symlink target, or
 // either of their parent directories: it must be owned by the user or root and
 // not writable by group or other, so only a trusted owner can change what
-// sallyport is about to read and approve.
+// sallyport is about to read and approve. A directory is exempt from the
+// writable check when it is sticky (see below), which is what lets root-owned
+// configs under /nix/store be trusted.
 func checkConfigNode(path string) error {
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -89,6 +91,18 @@ func checkConfigNode(path string) error {
 		return fmt.Errorf("%s is owned by uid %d (neither you, uid %d, nor root); chown it to yourself", path, uid, os.Getuid())
 	}
 	if fi.Mode().Perm()&0o022 != 0 {
+		// A group/world-writable directory is safe when it is sticky: the sticky
+		// bit lets only an entry's owner unlink or rename it, so no other user can
+		// rename-swap the root-owned config inside it. This is exactly how
+		// /nix/store (drwxrwxr-t) and /tmp are protected. Regular files get no
+		// such pass — a writable file is rewritten in place — and a non-sticky
+		// writable directory allows precisely the rename-swap we guard against.
+		if fi.IsDir() {
+			if fi.Mode()&os.ModeSticky != 0 {
+				return nil
+			}
+			return fmt.Errorf("%s is writable by others without the sticky bit; run: chmod go-w %s (a sticky writable dir like /nix/store is allowed, since sticky prevents rename-swap by non-owners)", path, path)
+		}
 		return fmt.Errorf("%s is writable by others; run: chmod go-w %s", path, path)
 	}
 	return nil

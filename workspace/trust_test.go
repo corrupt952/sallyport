@@ -423,3 +423,41 @@ func TestTrustRefusesSymlinkTargetParentWritable(t *testing.T) {
 		t.Error("Trust accepted a symlink whose target directory is world-writable")
 	}
 }
+
+func TestTrustAllowsStickyWritableTargetParent(t *testing.T) {
+	skipIfRoot(t)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	base := t.TempDir()
+	target := filepath.Join(base, "store", "config")
+	cfg := symlinkConfig(t, filepath.Join(base, "ws"), target, `{"env": {}}`)
+	// /nix/store is drwxrwxr-t: group-writable but sticky. Sticky stops
+	// non-owners from renaming entries, so a root-owned target cannot be
+	// swapped, and the config must still be trustable.
+	if err := os.Chmod(filepath.Dir(target), 0o777|os.ModeSticky); err != nil {
+		t.Fatal(err)
+	}
+	if err := Trust(cfg); err != nil {
+		t.Errorf("Trust rejected a config under a sticky writable directory: %v", err)
+	}
+	if !IsTrusted(cfg) {
+		t.Error("config under a sticky writable directory not trusted")
+	}
+}
+
+func TestTrustAllowsStickyWritableConfigParent(t *testing.T) {
+	skipIfRoot(t)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	dir := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeConfig(t, dir, `{"env": {}}`)
+	// A regular config directly inside a sticky, world-writable directory is
+	// safe for the same reason: sticky blocks the rename-swap.
+	if err := os.Chmod(dir, 0o777|os.ModeSticky); err != nil {
+		t.Fatal(err)
+	}
+	if err := Trust(ConfigPath(dir)); err != nil {
+		t.Errorf("Trust rejected a config in a sticky writable directory: %v", err)
+	}
+}
