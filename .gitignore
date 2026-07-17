@@ -108,3 +108,6 @@ zsdoc/data
 !/.envrc
 .sallyport.jsonc
 .claude/
+
+# Nix
+/result
