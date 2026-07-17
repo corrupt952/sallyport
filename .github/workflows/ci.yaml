@@ -43,7 +43,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y zsh
       # -count=1 defeats the test cache; the zsh integration tests depend on
       # the environment, not only the source.
-      - run: go test -race -count=1 ./...
+      - run: make test
 
   lint:
     name: Lint
