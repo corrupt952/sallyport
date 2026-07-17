@@ -12,8 +12,4 @@ builds:
       - amd64
       - arm64
 
-# Packaging only the binary — no LICENSE/README to include yet.
-# FYI: https://goreleaser.com/customization/archive/#packaging-only-the-binaries
-archives:
-  - files:
-      - none*
+# Default archive behavior: bundles LICENSE/README alongside the binary.

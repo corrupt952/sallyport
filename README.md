@@ -129,3 +129,7 @@ make run     # go run . <args>
 A Nix devShell (`nix develop`) provides `go`, `gopls`, `gotools`, `golangci-lint`, and `goreleaser`.
 
 Releases are cut by pushing a tag; [`.github/workflows/release.yaml`](.github/workflows/release.yaml) runs [GoReleaser](https://goreleaser.com) to build and publish binaries.
+
+## License
+
+MIT License - see [LICENSE](LICENSE) for details.
