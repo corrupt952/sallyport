@@ -20,6 +20,6 @@ func fail(err error) subcommands.ExitStatus {
 	if dst == nil {
 		dst = os.Stderr
 	}
-	fmt.Fprintf(dst, "  [FAIL] %s\n", err)
+	_, _ = fmt.Fprintf(dst, "  [FAIL] %s\n", err)
 	return subcommands.ExitFailure
 }

@@ -29,8 +29,8 @@ func TestExportCommandRoutesWarningsToStderr(t *testing.T) {
 	os.Stdout, os.Stderr = outFile, errFile
 	status := runCommand(t, &ExportCommand{}, "zsh")
 	os.Stdout, os.Stderr = stdout, stderr
-	outFile.Close()
-	errFile.Close()
+	_ = outFile.Close()
+	_ = errFile.Close()
 
 	if status != subcommands.ExitSuccess {
 		t.Fatalf("export returned %v, want ExitSuccess", status)

@@ -17,7 +17,7 @@ func progress(format string, a ...any) {
 	if dst == nil {
 		dst = os.Stdout
 	}
-	fmt.Fprintf(dst, format, a...)
+	_, _ = fmt.Fprintf(dst, format, a...)
 }
 
 func Info(format string, a ...any) { progress("  [ .. ] "+format+"\n", a...) }

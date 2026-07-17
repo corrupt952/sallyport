@@ -116,7 +116,7 @@ func TestExportEnterSavesOriginals(t *testing.T) {
 	t.Setenv(stateEnvKey, "")
 	t.Setenv("SSH_AUTH_SOCK", "/original/agent.sock")
 	t.Setenv("WORKSPACE_PATH", "placeholder")
-	os.Unsetenv("WORKSPACE_PATH")
+	_ = os.Unsetenv("WORKSPACE_PATH")
 	root := newWorkspaceDir(t, `{"env": {"SSH_AUTH_SOCK": "/1password/agent.sock"}}`)
 
 	script := mustBuild(t, root, false)
@@ -445,7 +445,7 @@ func TestExportStrictModeDoesNotExpandInZsh(t *testing.T) {
 		t.Skip("zsh not available")
 	}
 	t.Setenv(stateEnvKey, "")
-	os.Unsetenv("HOGE")
+	_ = os.Unsetenv("HOGE")
 	root := newWorkspaceDir(t, `{"env": {"HOGE": "$HOME/fuga"}}`)
 
 	enter := mustBuild(t, root, false)
@@ -888,9 +888,9 @@ func TestExportScriptEvalsInZsh(t *testing.T) {
 	}
 	t.Setenv(stateEnvKey, "")
 	// The applied vars must have no prior value so leaving unsets them.
-	os.Unsetenv("OP_ACCOUNT")
-	os.Unsetenv("HOGE")
-	os.Unsetenv("WORKSPACE_PATH")
+	_ = os.Unsetenv("OP_ACCOUNT")
+	_ = os.Unsetenv("HOGE")
+	_ = os.Unsetenv("WORKSPACE_PATH")
 	// expand mode so the shell expands $HOME in the value below.
 	root := newWorkspaceDir(t, `{"expand": true, "env": {"OP_ACCOUNT": "acct.example.com", "HOGE": "$HOME/fuga"}}`)
 
