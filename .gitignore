@@ -111,3 +111,6 @@ zsdoc/data
 
 # Nix
 /result
+
+# GoReleaser
+/dist

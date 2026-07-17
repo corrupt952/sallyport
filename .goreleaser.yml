@@ -1,0 +1,19 @@
+# https://goreleaser.com
+version: 2
+
+builds:
+  # command.Version is stamped via a full import-path ldflags target (not
+  # main.Version) — matches the working scheme already used in flake.nix.
+  - ldflags: -s -w -X "github.com/corrupt952/sallyport/command.Version={{.Version}}"
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+# Packaging only the binary — no LICENSE/README to include yet.
+# FYI: https://goreleaser.com/customization/archive/#packaging-only-the-binaries
+archives:
+  - files:
+      - none*
