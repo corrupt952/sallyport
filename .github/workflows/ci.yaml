@@ -59,10 +59,19 @@ jobs:
         with:
           version: latest
 
+  nix-build:
+    name: Nix build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
+      - run: nix build .#
+
   ci-result:
     name: CI Result
     if: always()
-    needs: [test, lint]
+    needs: [test, lint, nix-build]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
