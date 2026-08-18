@@ -107,7 +107,8 @@ Run `sallyport help` for the full built-in usage.
 {
   "expand": false,
   "env": {
-    "KEY": "value"
+    "OP_ACCOUNT": "acct.example.com",
+    "DATABASE_URL": "postgres://localhost:5432/myproject_dev"
   },
 }
 ```
@@ -116,6 +117,23 @@ Run `sallyport help` for the full built-in usage.
 - `expand` (default `false`, strict mode) — values are applied verbatim via single-quoting; safe for any content, no shell expansion. Set to `true` to have zsh expand `$VAR`, `$(...)`, etc. in values at apply time.
 
 A workspace is any directory whose nearest ancestor (searching upward) has a `.sallyport.jsonc`; every directory below it inherits the same environment until you leave that subtree.
+
+### Expanding values (`"expand": true`)
+
+Strict mode applies a value exactly as written: `$HOME` stays `$HOME`, `$(...)` never runs. Turn expansion on when the shell should build the value instead:
+
+```jsonc
+{
+  "expand": true,
+  "env": {
+    "PATH": "$WORKSPACE_PATH/bin:$PATH",
+    "OPENAI_API_KEY": "$(op read 'op://Private/OpenAI/credential')",
+    "DOCKER_HOST": "unix://$HOME/.colima/default/docker.sock"
+  },
+}
+```
+
+Values are evaluated by zsh as you enter the workspace, exactly as if the `export` line sat in your `.zshrc`: `$(op read ...)` runs on entry (not on every `cd` below the root), and a literal `"` in a value has to be escaped as `\"`.
 
 ## Development
 
