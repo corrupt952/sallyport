@@ -48,7 +48,9 @@ type state struct {
 // stateShellVar is declared non-exported: an exported state would be inherited
 // by every child process the workspace starts, defeating the isolation. The
 // hook instead passes it to the binary as stateEnvKey through zsh's one-shot
-// command-prefix assignment, which is process-local.
+// command-prefix assignment, which is process-local. That one-shot also masks
+// an inherited stateEnvKey, so the shim's own guard on stateShellVar is what
+// keeps state out of the environment's hands in both directions.
 //
 // The hook runs on precmd as well as chpwd so trust/untrust and config edits
 // take effect on the next prompt without a directory change. The precmd variant
@@ -78,6 +80,14 @@ func ZshHook() (string, error) {
 // fresh quoting context, which is also why the "${...-}" below works.
 func zshHookFor(self string) string {
 	return fmt.Sprintf(`typeset -g %[1]s
+# An exported state came from the environment, never from sallyport: the eval
+# below writes it with typeset -g, which leaves it unexported. Restoring from a
+# blob an outside process chose would let one injected variable decide what this
+# shell exports on its first prompt, so drop the value and the attribute. A
+# state this shim wrote is untouched, which is what re-sourcing .zshrc relies on.
+if [[ ${(t)%[1]s} == *export* ]]; then
+  typeset +x -g %[1]s=''
+fi
 _sallyport_hook() {
   # The SIGINT mask keeps a Ctrl-C from stopping the eval halfway and leaving the
   # environment and the state global inconsistent. localtraps confines it: zsh
@@ -118,7 +128,8 @@ func BuildExportScript(pwd string, quiet bool) (ExportResult, error) {
 	var warnings []string
 
 	st, schemaMismatch, err := decodeState(os.Getenv(stateEnvKey))
-	if err != nil {
+	corrupt := err != nil
+	if corrupt {
 		warnings = append(warnings, corruptStateWarning)
 		st = state{}
 	} else if schemaMismatch && !quiet {
@@ -174,8 +185,10 @@ func BuildExportScript(pwd string, quiet bool) (ExportResult, error) {
 	// The comparison runs after trust filtering, not before: revocation and
 	// expiry must take effect on the next prompt even without a cd. The
 	// fingerprint participates so an edited-and-retrusted config reapplies
-	// even though the root never changed.
-	if root == st.Root && fp == st.Fingerprint {
+	// even though the root never changed. A rejected state is never a no-op:
+	// the shell still holds the blob, so the script has to clear it or the
+	// warning returns on every prompt for as long as the shell lives.
+	if !corrupt && root == st.Root && fp == st.Fingerprint {
 		return ExportResult{Warnings: warnings}, nil
 	}
 

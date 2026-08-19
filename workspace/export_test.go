@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -507,12 +508,9 @@ func TestExportStrictModeDoesNotExpandInZsh(t *testing.T) {
 	if !strings.Contains(enter, "export HOGE='$HOME/fuga'") {
 		t.Fatalf("strict value not single-quoted:\n%s", enter)
 	}
-	out, err := exec.Command(zsh, "-c", "HOME=/sallyport-home\n"+enter+"\nprintf 'HOGE=%s\\n' \"$HOGE\"\n").CombinedOutput()
-	if err != nil {
-		t.Fatalf("zsh run failed: %v\n%s", err, out)
-	}
-	if got := string(out); !strings.Contains(got, "HOGE=$HOME/fuga") {
-		t.Errorf("strict mode expanded the value in zsh:\n%s", got)
+	out := exportRunZsh(t, zsh, t.TempDir(), "HOME=/sallyport-home\n"+enter+"\nprintf 'HOGE=%s\\n' \"$HOGE\"\n")
+	if !strings.Contains(out, "HOGE=$HOME/fuga") {
+		t.Errorf("strict mode expanded the value in zsh:\n%s", out)
 	}
 }
 
@@ -672,11 +670,7 @@ val="${` + stateShellVar + `-}"
 _sallyport_hook
 print "nounset-ok"
 `
-	out, err := exec.Command(zsh, "-c", script).CombinedOutput()
-	if err != nil {
-		t.Fatalf("zsh run failed: %v\n%s", err, out)
-	}
-	got := string(out)
+	got := exportRunZsh(t, zsh, t.TempDir(), script)
 	// The listing carries the trap's command body only if it survived.
 	if !strings.Contains(got, "trap -- 'print USERTRAP' INT") {
 		t.Errorf("user INT trap was clobbered by the hook:\n%s", got)
@@ -742,28 +736,13 @@ func TestZshHookRealZshRunsBinaryAtHostilePath(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			// Broken quoting can leave zsh waiting on a command substitution the
-			// path opened; WaitDelay caps the wait on the output pipe afterwards,
-			// so a regression reports instead of hanging the test binary.
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			cmd := exec.CommandContext(ctx, zsh, "-c", zshHookFor(fake)+`
+			got := exportRunZsh(t, zsh, dir, zshHookFor(fake)+`
 # ${+functions[...]} is 0 when the shim failed to parse: a mangled path can
 # break the enclosing function definition, not just the exec.
 printf 'HOOKDEF=%s\n' "${+functions[_sallyport_hook]}"
 _sallyport_hook
 printf 'PROBE=%s\n' "${SALLYPORT_PROBE-<unset>}"
 `)
-			cmd.Dir = dir
-			cmd.WaitDelay = 5 * time.Second
-			out, err := cmd.CombinedOutput()
-			if ctx.Err() != nil {
-				t.Fatalf("zsh never finished for a binary at %q:\n%s", dir, out)
-			}
-			if err != nil {
-				t.Fatalf("zsh run failed: %v\n%s", err, out)
-			}
-			got := string(out)
 			if !strings.Contains(got, "HOOKDEF=1") {
 				t.Errorf("shim for a binary at %q did not even define the hook:\n%s", dir, got)
 			}
@@ -1203,29 +1182,13 @@ func TestExportScriptEvalsInZshWithHostileLiterals(t *testing.T) {
 			setState(t, stateFromScript(t, enter))
 			leave := mustBuild(t, t.TempDir(), false)
 
-			// Broken quoting can leave zsh waiting on a quote or a command
-			// substitution the value opened; WaitDelay caps the wait on the output
-			// pipe afterwards, so a regression reports instead of hanging the test
-			// binary (see TestZshHookRealZshRunsBinaryAtHostilePath).
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			cmd := exec.CommandContext(ctx, zsh, "-c", enter+`
+			got := exportRunZsh(t, zsh, root, enter+`
 printf 'OP=%s\n' "$OP_ACCOUNT"
 printf 'WS=%s\n' "$WORKSPACE_PATH"
 `+leave+`
 printf 'OP_after=%s\n' "${OP_ACCOUNT-<unset>}"
 printf 'WS_after=%s\n' "${WORKSPACE_PATH-<unset>}"
 `)
-			cmd.Dir = root
-			cmd.WaitDelay = 5 * time.Second
-			out, err := cmd.CombinedOutput()
-			if ctx.Err() != nil {
-				t.Fatalf("zsh never finished for %q:\n%s", tc.want, out)
-			}
-			if err != nil {
-				t.Fatalf("zsh run failed: %v\n%s", err, out)
-			}
-			got := string(out)
 			for _, want := range []string{
 				"OP=" + tc.want,
 				"WS=" + root,
@@ -1269,11 +1232,7 @@ printf 'WS=%s\n' "$WORKSPACE_PATH"
 printf 'OP_after=%s\n' "${OP_ACCOUNT-<unset>}"
 printf 'WS_after=%s\n' "${WORKSPACE_PATH-<unset>}"
 `
-	out, err := exec.Command(zsh, "-c", script).CombinedOutput()
-	if err != nil {
-		t.Fatalf("zsh run failed: %v\n%s", err, out)
-	}
-	got := string(out)
+	got := exportRunZsh(t, zsh, t.TempDir(), script)
 	for _, want := range []string{
 		"OP=acct.example.com",       // literal config value applied
 		"HOGE=/sallyport-home/fuga", // $HOME expanded by the shell
@@ -1300,50 +1259,132 @@ func TestZshQuote(t *testing.T) {
 	}
 }
 
-// exportForgedSavedKeys are saved keys no sallyport ever wrote: parseConfig's
-// keyRe rejects them on the way in, so a state carrying one was forged. They
-// land unquoted in `export KEY=` and `unset KEY`, which the shell evals, so
-// each turns a restore into a command of the forger's choosing.
-var exportForgedSavedKeys = []struct {
-	name string
-	key  string
+// exportSetRawState installs a state blob verbatim, without encodeState. A
+// forger writes the JSON, so the cases below control what the encoder would
+// otherwise decide for them: whether a schema is stamped at all, whether root is
+// present, and what order the keys arrive in.
+func exportSetRawState(t *testing.T, jsonSrc string) {
+	t.Helper()
+	t.Setenv(stateEnvKey, base64.StdEncoding.EncodeToString([]byte(jsonSrc)))
+}
+
+// exportForgedStates are __SALLYPORT_STATE blobs no sallyport could have
+// written: parseConfig's keyRe rejects such keys on the way in, so anything
+// carrying one was forged. Saved keys land unquoted in `export KEY=` and
+// `unset KEY`, which the shell evals, so each blob turns a restore into a
+// command of the forger's choosing. marker is what must never reach the script.
+//
+// The shape of the blob is part of the case, not incidental: a guard that only
+// looks at self-stamped blobs, or only at the first key, or only at short keys,
+// or only when root is set, leaves a hole a forger picks the shape to fit.
+var exportForgedStates = []struct {
+	name   string
+	json   string
+	marker string
+	// inWorkspace runs the transition from inside a trusted workspace. A blob
+	// claiming no root only renders its keys when the destination differs from
+	// the empty root it claims.
+	inWorkspace bool
 }{
-	{"command separator", "A; touch OOPS; echo"},
-	{"command substitution", "A=$(touch OOPS); B"},
-	{"newline", "A\ntouch OOPS\nB"},
-	{"leading digit", "9A"},
-	{"dash", "A-B"},
+	{
+		name:   "command separator",
+		json:   `{"root":"/somewhere/demo","saved":{"A; touch OOPS; echo":"x"},"schema":"` + stateSchema + `"}`,
+		marker: "OOPS",
+	},
+	{
+		name:   "unset branch",
+		json:   `{"root":"/somewhere/demo","saved":{"A; touch OOPS; echo":null},"schema":"` + stateSchema + `"}`,
+		marker: "OOPS",
+	},
+	{
+		name:   "command substitution",
+		json:   `{"root":"/somewhere/demo","saved":{"A=$(touch OOPS); B":"x"},"schema":"` + stateSchema + `"}`,
+		marker: "OOPS",
+	},
+	{
+		name:   "newline",
+		json:   `{"root":"/somewhere/demo","saved":{"A\ntouch OOPS\nB":"x"},"schema":"` + stateSchema + `"}`,
+		marker: "OOPS",
+	},
+	{
+		name:   "leading digit",
+		json:   `{"root":"/somewhere/demo","saved":{"9A":"x"},"schema":"` + stateSchema + `"}`,
+		marker: "9A",
+	},
+	{
+		name:   "dash",
+		json:   `{"root":"/somewhere/demo","saved":{"A-B":"x"},"schema":"` + stateSchema + `"}`,
+		marker: "A-B",
+	},
+	{
+		// The forged key sorts last, so checking only the first key misses it.
+		name:   "benign key sorts first",
+		json:   `{"root":"/somewhere/demo","saved":{"AAA_BENIGN":"1","Z; touch OOPS; echo":"x"},"schema":"` + stateSchema + `"}`,
+		marker: "OOPS",
+	},
+	{
+		// ... and sorting it first is no safer, so neither end can be trusted.
+		name:   "benign key sorts last",
+		json:   `{"root":"/somewhere/demo","saved":{"A; touch OOPS; echo":"x","ZZZ_BENIGN":"1"},"schema":"` + stateSchema + `"}`,
+		marker: "OOPS",
+	},
+	{
+		// Longer than any key a config would plausibly carry: length is not a
+		// reason to stop looking.
+		name:   "long key",
+		json:   `{"root":"/somewhere/demo","saved":{"PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP; touch OOPS; echo":"x"},"schema":"` + stateSchema + `"}`,
+		marker: "OOPS",
+	},
+	{
+		// No schema at all, as a forger who never read this binary would write it.
+		name:   "no schema",
+		json:   `{"root":"/somewhere/demo","saved":{"A; touch OOPS; echo":"x"}}`,
+		marker: "OOPS",
+	},
+	{
+		name:   "foreign schema",
+		json:   `{"root":"/somewhere/demo","saved":{"A; touch OOPS; echo":"x"},"schema":"000000000000"}`,
+		marker: "OOPS",
+	},
+	{
+		// No root: the transition only happens on the way *into* a workspace.
+		name:        "no root",
+		json:        `{"saved":{"A; touch OOPS; echo":"x"},"schema":"` + stateSchema + `"}`,
+		marker:      "OOPS",
+		inWorkspace: true,
+	},
 }
 
 // A forged state must be discarded like a corrupt one: the restore keys are the
-// only place a key reaches the shell without keyRe having seen it. Both branches
-// are covered, because guarding one leaves the other live: a non-nil original
-// renders `export KEY=`, a nil one `unset KEY`.
-func TestExportDiscardsStateWithForgedSavedKeys(t *testing.T) {
-	for _, tc := range exportForgedSavedKeys {
-		for _, branch := range []string{"export", "unset"} {
-			t.Run(tc.name+"/"+branch, func(t *testing.T) {
-				var orig *string
-				if branch == "export" {
-					v := "x"
-					orig = &v
+// only place a key reaches the shell without keyRe having seen it. The quiet
+// axis is not decoration — the shim calls the binary with -quiet on every
+// prompt, so a guard that only runs on the loud path is a guard the hook mostly
+// skips.
+func TestExportDiscardsForgedState(t *testing.T) {
+	for _, tc := range exportForgedStates {
+		for _, quiet := range []bool{false, true} {
+			name := tc.name + "/loud"
+			if quiet {
+				name = tc.name + "/quiet"
+			}
+			t.Run(name, func(t *testing.T) {
+				pwd := t.TempDir()
+				if tc.inWorkspace {
+					pwd = newWorkspaceDir(t, `{"env": {"OP_ACCOUNT": "acct.example.com"}}`)
 				}
-				setState(t, state{Root: "/somewhere/demo", Saved: map[string]*string{tc.key: orig}})
+				exportSetRawState(t, tc.json)
 
-				res, err := BuildExportScript(t.TempDir(), false)
+				res, err := BuildExportScript(pwd, quiet)
 				if err != nil {
 					t.Fatal(err)
 				}
 				if !hasWarning(res.Warnings, "is corrupted") {
 					t.Errorf("forged state accepted without the corrupt-state warning: %v", res.Warnings)
 				}
-				for _, line := range strings.Split(res.Script, "\n") {
-					if !strings.HasPrefix(line, "export ") && !strings.HasPrefix(line, "unset ") {
-						continue
-					}
-					if strings.Contains(line, "OOPS") || strings.Contains(line, tc.key) {
-						t.Errorf("forged key rendered into the script: %q\n%s", line, res.Script)
-					}
+				// The whole script, not just the lines that start like a restore: a
+				// key carrying a newline puts its payload on a line of its own.
+				if strings.Contains(res.Script, tc.marker) {
+					t.Errorf("forged key reached the script (looking for %q):\n%s", tc.marker, res.Script)
 				}
 			})
 		}
@@ -1351,25 +1392,68 @@ func TestExportDiscardsStateWithForgedSavedKeys(t *testing.T) {
 }
 
 // The real judge for the forged-key rejection: let zsh eval the script the hook
-// would have eval'd and see whether the key ran as a command.
+// would have eval'd and see whether the key ran as a command. Both restore
+// branches go through it, since guarding one leaves the other live.
 func TestExportForgedStateKeyDoesNotRunInZsh(t *testing.T) {
 	zsh, err := exec.LookPath("zsh")
 	if err != nil {
 		t.Skip("zsh not available")
 	}
-	dir := t.TempDir()
-	setState(t, state{
-		Root:  "/somewhere/demo",
-		Saved: map[string]*string{"A; touch " + filepath.Join(dir, "OOPS") + "; echo": nil},
-	})
-	script := mustBuild(t, t.TempDir(), false)
+	for _, branch := range []string{"export", "unset"} {
+		for _, quiet := range []bool{false, true} {
+			name := branch
+			if quiet {
+				name += "/quiet"
+			}
+			t.Run(name, func(t *testing.T) {
+				dir := t.TempDir()
+				val := `"x"`
+				if branch == "unset" {
+					val = "null"
+				}
+				key := "A; touch " + filepath.Join(dir, "OOPS") + "; echo"
+				exportSetRawState(t, `{"root":"/somewhere/demo","saved":{`+
+					strconv.Quote(key)+`:`+val+`},"schema":"`+stateSchema+`"}`)
 
-	out := exportRunZsh(t, zsh, dir, script+"\nprint EVALED\n")
-	if !strings.Contains(out, "EVALED") {
-		t.Fatalf("the script did not eval at all:\n%s", out)
+				res, err := BuildExportScript(t.TempDir(), quiet)
+				if err != nil {
+					t.Fatal(err)
+				}
+				out := exportRunZsh(t, zsh, dir, res.Script+"\nprint EVALED\n")
+				if !strings.Contains(out, "EVALED") {
+					t.Fatalf("the script did not eval at all:\n%s", out)
+				}
+				if _, err := os.Stat(filepath.Join(dir, "OOPS")); err == nil {
+					t.Errorf("the forged saved key was executed as a command:\n%s", res.Script)
+				}
+			})
+		}
 	}
-	if _, err := os.Stat(filepath.Join(dir, "OOPS")); err == nil {
-		t.Errorf("the forged saved key was executed as a command:\n%s", script)
+}
+
+// A rejected state is still sitting in the shell variable, so the script has to
+// clear it. Otherwise nothing about the shell changes, the next prompt decodes
+// the same blob, and the warning repeats for as long as the shell lives.
+func TestExportClearsRejectedState(t *testing.T) {
+	for _, quiet := range []bool{false, true} {
+		name := "loud"
+		if quiet {
+			name = "quiet"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(stateEnvKey, "@@@not-base64")
+
+			res, err := BuildExportScript(t.TempDir(), quiet)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !hasWarning(res.Warnings, "is corrupted") {
+				t.Errorf("corrupt state did not warn: %v", res.Warnings)
+			}
+			if !strings.Contains(res.Script, "typeset -g "+stateShellVar+"=''") {
+				t.Errorf("rejected state is left in the shell, so the warning repeats every prompt:\n%q", res.Script)
+			}
+		})
 	}
 }
 
@@ -1406,16 +1490,26 @@ func exportPlantStandin(t *testing.T, body string) string {
 	return path
 }
 
-// exportRunZsh runs script under zsh in dir. A shim or a script that opens a
-// quote or a command substitution it never closes leaves zsh waiting; WaitDelay
-// caps the wait on the output pipe afterwards, so a regression reports instead
-// of hanging the test binary.
+// exportRunZsh runs script under zsh in dir. Every zsh in this file goes through
+// here: a shim or a script that opens a quote or a command substitution it never
+// closes leaves zsh waiting, and WaitDelay caps the wait on the output pipe
+// after the context expires, so a regression reports instead of hanging the
+// whole test binary.
 func exportRunZsh(t *testing.T, zsh, dir, script string) string {
+	t.Helper()
+	return exportRunZshWithEnv(t, zsh, dir, nil, script)
+}
+
+// exportRunZshWithEnv is exportRunZsh with extra KEY=VALUE entries in zsh's
+// environment, for the cases that have to model a shell born with something
+// already set.
+func exportRunZshWithEnv(t *testing.T, zsh, dir string, env []string, script string) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, zsh, "-c", script)
 	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), env...)
 	cmd.WaitDelay = 5 * time.Second
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {
@@ -1533,6 +1627,47 @@ trap
 	}
 	if !strings.Contains(out, "trap -- 'INTFIRED=yes") {
 		t.Errorf("the mask outlived the hook instead of being confined to it:\n%s", out)
+	}
+}
+
+// The route an injected state actually takes, pinned end to end. `typeset -g`
+// on a parameter that already exists keeps its value *and* its export attribute,
+// so a shell born with __sallyport_state in its environment would otherwise hand
+// that blob straight to the binary and eval whatever came back — one injected
+// environment variable deciding what the shell exports at its first prompt. The
+// shim has to recognise such a state as foreign (it never exports the one it
+// writes) and drop both the value and the attribute, while leaving a state it
+// did write alone, which is what re-sourcing .zshrc depends on.
+func TestZshHookRealZshDropsInheritedState(t *testing.T) {
+	zsh, err := exec.LookPath("zsh")
+	if err != nil {
+		t.Skip("zsh not available")
+	}
+	standin := exportPlantStandin(t, `#!/bin/sh
+printf "export SALLYPORT_SAW='%s'\n" "${__SALLYPORT_STATE-<absent>}"
+`)
+	shim := zshHookFor(standin)
+	out := exportRunZshWithEnv(t, zsh, filepath.Dir(standin),
+		[]string{stateShellVar + "=INJECTED-BY-THE-ENVIRONMENT"}, shim+`
+_sallyport_hook
+printf 'SAW=[%s]\n' "$SALLYPORT_SAW"
+printf 'TYPE=[%s]\n' "${(t)`+stateShellVar+`}"
+printf 'CHILDENV=[%s]\n' "$(env | grep -c '^`+stateShellVar+`=')"
+# A state the shim itself wrote is not foreign, and must survive .zshrc being
+# sourced a second time.
+typeset -g `+stateShellVar+`='OURS'
+`+shim+`
+printf 'RESOURCED=[%s]\n' "${`+stateShellVar+`}"
+`)
+	for _, want := range []string{
+		"SAW=[]",        // the binary got no state, not the injected blob
+		"TYPE=[scalar]", // the export attribute went with the value
+		"CHILDENV=[0]",  // ... so children do not inherit it either
+		"RESOURCED=[OURS]",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("shim output missing %q:\n%s", want, out)
+		}
 	}
 }
 
