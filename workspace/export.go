@@ -71,6 +71,16 @@ type state struct {
 // reason direnv hooks both). The precmd variant passes -quiet: repeating the
 // "not trusted" warning on every empty Enter would drown the prompt.
 //
+// The path to the binary is single-quoted with zshQuote rather than
+// interpolated between double quotes. Double quotes still expand $ and `, so a
+// binary installed under a path containing either would be mangled at every
+// hook invocation: `$b` in .../a$b/sallyport expands to nothing and the exec
+// fails silently (the hook swallows it and returns 0), and a backtick opens a
+// command substitution that breaks the shim's own parse, leaving
+// _sallyport_hook undefined. Single quotes are safe here even though the
+// eval's `$(...)` sits inside double quotes: a command substitution starts a
+// fresh quoting context, which is also why the "${...-}" above works.
+//
 // The shim only registers and never applies immediately: applying while
 // .zshrc is still being sourced lets later export lines clobber workspace
 // values (frozen in by the fast path), and records pre-.zshrc values as the
@@ -93,7 +103,7 @@ _sallyport_hook() {
   # ${...-} guards against setopt nounset: after a workspace is left the state
   # global is set to '' (not unset), but a defensive default keeps the hook
   # working even if some other code unset it.
-  eval "$(%[2]s="${%[1]s-}" "%[3]s" export "$@" zsh)"
+  eval "$(%[2]s="${%[1]s-}" %[3]s export "$@" zsh)"
   return 0
 }
 _sallyport_hook_precmd() {
@@ -106,7 +116,7 @@ fi
 if (( ! ${precmd_functions[(I)_sallyport_hook_precmd]} )); then
   precmd_functions=(_sallyport_hook_precmd $precmd_functions)
 fi
-`, stateShellVar, stateEnvKey, self), nil
+`, stateShellVar, stateEnvKey, zshQuote(self)), nil
 }
 
 // ExportResult is the outcome of evaluating a directory: the shell script to

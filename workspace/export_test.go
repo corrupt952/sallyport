@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newWorkspaceDir(t *testing.T, config string) string {
@@ -612,6 +614,88 @@ print "nounset-ok"
 	// The hook must complete under nounset with an empty state global.
 	if !strings.Contains(got, "nounset-ok") {
 		t.Errorf("hook aborted under nounset:\n%s", got)
+	}
+}
+
+// Regression guard: the binary's own path must be single-quoted in the shim,
+// not interpolated between double quotes. Double quotes still expand $ and `,
+// so an install path containing either was rewritten at every hook invocation.
+// os.Executable() cannot be substituted in a test, so this pins the shape of
+// the emitted line; TestZshHookRealZshRunsBinaryAtExpandablePath below proves
+// the shape actually works for such a path under zsh.
+func TestZshHookQuotesBinaryPath(t *testing.T) {
+	script, err := ZshHook()
+	if err != nil {
+		t.Fatal(err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(script, zshQuote(self)) {
+		t.Errorf("shim does not single-quote the binary path:\n%s", script)
+	}
+	if strings.Contains(script, `"`+self+`"`) {
+		t.Errorf("shim interpolates the binary path between double quotes, so $ and ` in it expand:\n%s", script)
+	}
+}
+
+// End-to-end companion to the guard above: take the real shim and swap in a
+// stand-in binary whose path contains both a $ and a backtick, then run the
+// hook under zsh. With the old double-quoted form `$b` expanded to nothing (so
+// the exec silently failed and the hook still returned 0) and the backtick
+// opened a command substitution that broke the shim's own parse, leaving
+// _sallyport_hook undefined. Swapping the path rather than hand-writing a line
+// keeps the surrounding quoting context — the eval's `$(...)` nested inside
+// double quotes — exactly as ZshHook emits it.
+func TestZshHookRealZshRunsBinaryAtExpandablePath(t *testing.T) {
+	zsh, err := exec.LookPath("zsh")
+	if err != nil {
+		t.Skip("zsh not available")
+	}
+
+	shim, err := ZshHook()
+	if err != nil {
+		t.Fatal(err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The stand-in only has to be executable and print a script to eval; the
+	// point of the test is whether zsh resolves the path at all.
+	dir := filepath.Join(t.TempDir(), "a$b`c d")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fake := filepath.Join(dir, "sallyport")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nprintf 'export SALLYPORT_PROBE=ok\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	shim = strings.Replace(shim, zshQuote(self), zshQuote(fake), 1)
+	// Bounded, because a regression does not merely fail: the command
+	// substitution the backtick opens leaves zsh waiting, and the process it
+	// spawns keeps the output pipe open, so an unbounded run would hang the
+	// whole test binary instead of reporting the regression. WaitDelay caps the
+	// wait on that inherited pipe after the context kills zsh itself.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, zsh, "-c", shim+`
+_sallyport_hook
+printf 'PROBE=%s\n' "${SALLYPORT_PROBE-<unset>}"
+`)
+	cmd.WaitDelay = 5 * time.Second
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("zsh did not finish; the shim's binary path is not properly quoted:\n%s", out)
+	}
+	if err != nil {
+		t.Fatalf("zsh run failed: %v\n%s", err, out)
+	}
+	if got := string(out); !strings.Contains(got, "PROBE=ok") {
+		t.Errorf("hook did not run the binary at a path containing $ and `:\n%s", got)
 	}
 }
 
