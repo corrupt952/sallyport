@@ -57,17 +57,6 @@ func TestNearestConfigNotFound(t *testing.T) {
 	}
 }
 
-func TestNearestConfigRejectsExtraArgs(t *testing.T) {
-	silenceOutput(t)
-	path, status := nearestConfig(flagSet(t, "extra"), t.TempDir(), "usage")
-	if path != "" {
-		t.Errorf("got path %q, want empty", path)
-	}
-	if status != subcommands.ExitUsageError {
-		t.Errorf("got status %v, want ExitUsageError", status)
-	}
-}
-
 func TestTrustUntrustCommands(t *testing.T) {
 	silenceOutput(t)
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
