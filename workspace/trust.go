@@ -403,9 +403,15 @@ func Untrust(path string) error {
 	return nil
 }
 
-// Prune removes grants whose recorded config file no longer exists, plus
-// leftovers of interrupted writes. Grants for edited configs are kept on
-// purpose: restoring the original bytes legitimately revives them.
+// Prune removes grants whose recorded path holds nothing at all, plus leftovers
+// of interrupted writes. "Holds nothing" is deliberately weaker than FindRoot's
+// "is a regular file": a config symlink whose target is mid-replacement still
+// has a file at that path, and a dangling one keeps its grant until untrust
+// removes it. Keeping a grant is reversible and applies to nothing on its own
+// (the fingerprint still has to match); deleting a live one is neither.
+//
+// Grants for edited configs are kept on the same reasoning: restoring the
+// original bytes legitimately revives them.
 func Prune() error {
 	dir, err := verifyTrustStore()
 	if err != nil {
@@ -441,7 +447,8 @@ func Prune() error {
 			removed++
 			continue
 		}
-		if _, err := os.Stat(path); err != nil {
+		// Lstat, not Stat: see the presence rule above.
+		if _, err := os.Lstat(path); err != nil {
 			if !os.IsNotExist(err) {
 				// A permission or I/O error is not proof the config is gone;
 				// removing the grant on a guess would revoke a valid one.
