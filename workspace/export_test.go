@@ -187,6 +187,29 @@ func TestExportLeaveRestoresOriginals(t *testing.T) {
 	}
 }
 
+// A variable that existed but was empty before the workspace must come back as
+// an empty variable, not as an unset one: `${VAR-default}` and conditionals on
+// `${VAR+set}` tell the two apart.
+func TestExportRestoresEmptyOriginalAsEmpty(t *testing.T) {
+	t.Setenv(stateEnvKey, "")
+	t.Setenv("OP_ACCOUNT", "")
+	root := newWorkspaceDir(t, `{"env": {"OP_ACCOUNT": "acct.example.com"}}`)
+
+	st := stateFromScript(t, mustBuild(t, root, false))
+	if got, hit := st.Saved["OP_ACCOUNT"]; !hit || got == nil || *got != "" {
+		t.Fatalf("empty original not recorded as a value: %v", st.Saved)
+	}
+
+	setState(t, st)
+	leave := mustBuild(t, t.TempDir(), false)
+	if !strings.Contains(leave, "export OP_ACCOUNT=''") {
+		t.Errorf("empty original not restored as an empty variable:\n%s", leave)
+	}
+	if strings.Contains(leave, "unset OP_ACCOUNT") {
+		t.Errorf("empty original restored as unset:\n%s", leave)
+	}
+}
+
 func TestExportSwitchKeepsPreWorkspaceOriginals(t *testing.T) {
 	t.Setenv(stateEnvKey, "")
 	t.Setenv("SSH_AUTH_SOCK", "/original/agent.sock")
@@ -780,6 +803,14 @@ func TestExportUnsafeTrustStoreWarningGating(t *testing.T) {
 	if !hasWarning(res.Warnings, "not secure") {
 		t.Errorf("unsafe-store warning must be forced when the applied workspace can no longer be trusted: %v", res.Warnings)
 	}
+	// The rollback must reach the shell, not just the warning: a script that
+	// leaves the state pointing at the root would keep the workspace applied and
+	// repeat the warning on every prompt.
+	for _, want := range []string{"unset OP_ACCOUNT", "typeset -g " + stateShellVar + "=''"} {
+		if !strings.Contains(res.Script, want) {
+			t.Errorf("rollback script missing %q:\n%s", want, res.Script)
+		}
+	}
 }
 
 func TestExportBrokenConfigWarningGating(t *testing.T) {
@@ -891,6 +922,41 @@ func TestDecodeState(t *testing.T) {
 	}
 }
 
+// The standard and URL-safe base64 alphabets differ in exactly two characters,
+// so a payload of plain ASCII round-trips even when encode and decode disagree
+// about which alphabet they speak. These values push the encoding onto those
+// two characters, where a disagreement shows up as a state that fails to decode
+// and takes the pre-workspace originals with it.
+func TestDecodeStateRoundTripsAlphabetSpecificPayloads(t *testing.T) {
+	values := []string{
+		"~/.local/bin:/usr/bin",
+		"/home/o~brien/bin",
+		"~?~",
+		"a?b~c?d~",
+	}
+	alphabetSpecific := false
+	for _, want := range values {
+		orig := want
+		enc, err := encodeState(state{Root: "/x", Saved: map[string]*string{"PATH": &orig}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.ContainsAny(enc, "+/") {
+			alphabetSpecific = true
+		}
+		s, _, err := decodeState(enc)
+		if err != nil {
+			t.Fatalf("state carrying %q failed to round-trip: %v", want, err)
+		}
+		if got := s.Saved["PATH"]; got == nil || *got != want {
+			t.Errorf("saved original lost: got %v, want %q", got, want)
+		}
+	}
+	if !alphabetSpecific {
+		t.Error("no payload encoded to a + or /, so this test no longer distinguishes the base64 alphabets; add values until one does")
+	}
+}
+
 // This pins the state wire layout: changing the state struct changes the string
 // and fails the test on purpose. Go's json ignores unknown fields and zero-fills
 // missing ones, so ADDING an optional field is compatible; when you change the
@@ -949,6 +1015,110 @@ func TestRenderScript(t *testing.T) {
 	lines := strings.Split(strings.TrimRight(script, "\n"), "\n")
 	if last := lines[len(lines)-1]; last != strings.TrimRight(stateLine, "\n") {
 		t.Errorf("state line not last: %q", last)
+	}
+}
+
+// Kept cheap so it still runs where zsh is unavailable. Like
+// TestZshHookQuotesBinaryPath it does not compare against zshQuote's output,
+// which would pass just as happily for bare single quotes around the value;
+// requiring the value to have been altered catches that while leaving a
+// differently-but-correctly quoting implementation free.
+func TestRenderScriptEscapesLiteralValues(t *testing.T) {
+	const val = `it's $HOME`
+	script := renderScript(nil, []EnvVar{{Key: "LIT", Val: val, Literal: true}}, "")
+	if strings.Contains(script, val) {
+		t.Errorf("literal value carried verbatim, so the shell rewrites it:\n%s", script)
+	}
+}
+
+// exportWorkspaceDirNamed is newWorkspaceDir with a caller-chosen directory
+// name, so the workspace path itself can carry shell metacharacters.
+func exportWorkspaceDirNamed(t *testing.T, name, config string) string {
+	t.Helper()
+	if cur := os.Getenv("XDG_DATA_HOME"); cur == "" || !strings.HasPrefix(cur, os.TempDir()) {
+		t.Setenv("XDG_DATA_HOME", t.TempDir())
+	}
+	root := filepath.Join(t.TempDir(), name)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := filepath.EvalSymlinks(root); err == nil {
+		root = c
+	}
+	writeConfig(t, root, config)
+	if err := Trust(ConfigPath(root)); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// exportHostileLiteralValues are strict-mode values (and, through the workspace
+// directory name, WORKSPACE_PATH) that a quoting scheme has to carry as text.
+// The JSON source is given alongside the value it must produce, so a case is
+// read as the config the user actually wrote.
+var exportHostileLiteralValues = []struct {
+	name string
+	json string
+	want string
+}{
+	{"apostrophe", `o'brien;touch OOPS;'`, `o'brien;touch OOPS;'`},
+	{"double quote", `a\"b`, `a"b`},
+	{"backslash", `back\\slash`, `back\slash`},
+	{"substitution", `$(touch OOPS)`, `$(touch OOPS)`},
+	{"backtick", "`touch OOPS`", "`touch OOPS`"},
+	{"history bang", `!bang`, `!bang`},
+	{"newline", `a\nb;touch OOPS`, "a\nb;touch OOPS"},
+}
+
+// The real judge for literal quoting: a workspace whose path and values both
+// carry shell metacharacters. The assertion is behavioural — did zsh end up
+// with the exact strings, and did it run nothing it was not asked to — so any
+// correct quoting scheme passes and any broken one fails. WORKSPACE_PATH is
+// always literal, so a directory named o'brien reaches that path with no config
+// entry at all.
+func TestExportScriptEvalsInZshWithHostileLiterals(t *testing.T) {
+	zsh, err := exec.LookPath("zsh")
+	if err != nil {
+		t.Skip("zsh not available")
+	}
+	for _, tc := range exportHostileLiteralValues {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(stateEnvKey, "")
+			_ = os.Unsetenv("OP_ACCOUNT")
+			_ = os.Unsetenv("WORKSPACE_PATH")
+			root := exportWorkspaceDirNamed(t, "o'brien", `{"env": {"OP_ACCOUNT": "`+tc.json+`"}}`)
+
+			enter := mustBuild(t, root, false)
+			setState(t, stateFromScript(t, enter))
+			leave := mustBuild(t, t.TempDir(), false)
+
+			cmd := exec.Command(zsh, "-c", enter+`
+printf 'OP=%s\n' "$OP_ACCOUNT"
+printf 'WS=%s\n' "$WORKSPACE_PATH"
+`+leave+`
+printf 'OP_after=%s\n' "${OP_ACCOUNT-<unset>}"
+printf 'WS_after=%s\n' "${WORKSPACE_PATH-<unset>}"
+`)
+			cmd.Dir = root
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("zsh run failed: %v\n%s", err, out)
+			}
+			got := string(out)
+			for _, want := range []string{
+				"OP=" + tc.want,
+				"WS=" + root,
+				"OP_after=<unset>",
+				"WS_after=<unset>",
+			} {
+				if !strings.Contains(got, want) {
+					t.Errorf("zsh output missing %q:\n%s", want, got)
+				}
+			}
+			if _, err := os.Stat(filepath.Join(root, "OOPS")); err == nil {
+				t.Error("the value was executed as a command instead of being applied as text")
+			}
+		})
 	}
 }
 
