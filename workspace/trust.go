@@ -148,6 +148,21 @@ func verifyTrustStore() error {
 // node and the resolved target and the target's parent checked, so neither the
 // link nor its destination can be repointed or rewritten by an untrusted user.
 // Config-side ownership allows the user or root (see trustedOwner).
+//
+// The guarantee stops at that immediate parent: no higher ancestor is examined.
+// A world-writable non-sticky directory further up could in principle be
+// rename-swapped whole, putting a different tree under the same path — the same
+// attack checkConfigNode blocks one level down. Walking to the filesystem root
+// is deliberately not done: it would reject legitimate layouts whose upper
+// directories are group-writable by policy (shared project or home trees). What
+// bounds the remainder is the fingerprint, not a deeper walk: a grant is
+// sha256(identity + content), the identity is derived from the path, and
+// LoadTrustedConfig re-hashes the bytes it is about to apply. A tree swapped in
+// under the same path either keeps that identity and changes the content, or
+// changes the identity itself; either way no grant matches and the apply path
+// returns ErrUntrusted. So an unchecked ancestor only widens the window this
+// function is already scoped to — between a human reading the config and Trust
+// hashing it — and buys nothing once a grant exists.
 func verifyConfigPath(path string) error {
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -234,6 +249,13 @@ func fingerprintBytes(abs string, content []byte) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// IsTrusted answers whether a grant exists for the bytes currently on disk,
+// without reading the config for use. Nothing on the apply path calls it, and
+// nothing should: asking here and applying afterwards reads the file twice and
+// reopens exactly the window LoadTrustedConfig exists to close, so every caller
+// that intends to act on the config goes through LoadTrustedConfig instead. It
+// remains as a probe for the tests, which need to assert grant state after
+// Trust/Untrust/Prune without applying anything.
 func IsTrusted(path string) bool {
 	// An insecure store means any grant it holds may be forged; trust nothing.
 	if verifyTrustStore() != nil {
