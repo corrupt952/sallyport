@@ -72,8 +72,6 @@ func setState(t *testing.T, s state) {
 	t.Setenv(stateEnvKey, encoded)
 }
 
-// mustBuild runs BuildExportScript, fails on error, and returns the script.
-// The warning-gating tests call BuildExportScript directly to inspect Warnings.
 func mustBuild(t *testing.T, pwd string, quiet bool) string {
 	t.Helper()
 	res, err := BuildExportScript(pwd, quiet)
@@ -83,7 +81,6 @@ func mustBuild(t *testing.T, pwd string, quiet bool) string {
 	return res.Script
 }
 
-// hasWarning reports whether any warning contains substr.
 func hasWarning(warnings []string, substr string) bool {
 	for _, w := range warnings {
 		if strings.Contains(w, substr) {
@@ -94,8 +91,7 @@ func hasWarning(warnings []string, substr string) bool {
 }
 
 // forgeGrant writes a trust record for root's config bytes directly, bypassing
-// Trust's parse check to simulate bytes approved by an older version with
-// different parse rules.
+// Trust's parse check, as an older version with different parse rules would.
 func forgeGrant(t *testing.T, root string) {
 	t.Helper()
 	abs, err := filepath.Abs(ConfigPath(root))
@@ -106,9 +102,6 @@ func forgeGrant(t *testing.T, root string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The store has to be locatable for a forged grant to mean anything; the
-	// tests here set XDG_DATA_HOME to a temp dir, so a failure is a broken
-	// fixture rather than the refusal trustDir exists to produce.
 	store, err := trustDir()
 	if err != nil {
 		t.Fatal(err)
@@ -150,8 +143,6 @@ func TestExportEnterSavesOriginals(t *testing.T) {
 	}
 }
 
-// configFingerprint mirrors the fingerprint of root's config as
-// LoadTrustedConfig would compute it, for building applied states in tests.
 func configFingerprint(t *testing.T, root string) string {
 	t.Helper()
 	fp, err := fingerprint(ConfigPath(root))
@@ -223,8 +214,7 @@ func TestExportSwitchKeepsPreWorkspaceOriginals(t *testing.T) {
 func TestExportIgnoresBrokenConfig(t *testing.T) {
 	t.Setenv(stateEnvKey, "")
 	root := newUntrustedWorkspaceDir(t, `{"env": {"$(whoami)": "x"}}`)
-	// Trust refuses unparseable configs, so forge the grant directly to
-	// simulate bytes approved by an older version with different parse rules.
+	// Trust refuses unparseable configs, so forge the grant directly.
 	forgeGrant(t, root)
 
 	script := mustBuild(t, root, false)
@@ -308,9 +298,9 @@ func TestExportTrustInPlaceApplies(t *testing.T) {
 	}
 }
 
-// The shim must not invoke the hook while .zshrc is still being sourced:
-// later export lines would clobber applied values and be recorded as the
-// values to restore. Application belongs to the first precmd.
+// The shim must not invoke the hook while .zshrc is still being sourced: later
+// export lines would clobber applied values and be recorded as the ones to
+// restore.
 func TestZshHookRegistersWithoutApplying(t *testing.T) {
 	script, err := ZshHook()
 	if err != nil {
@@ -323,9 +313,9 @@ func TestZshHookRegistersWithoutApplying(t *testing.T) {
 	}
 }
 
-// The shim must keep the state non-exported and pass it to the binary only
-// as a one-shot, invocation-scoped env var: an exported state would be
-// inherited by every child process the workspace starts.
+// The state must stay non-exported and reach the binary only as a one-shot,
+// invocation-scoped env var: an exported state would be inherited by every
+// child process the workspace starts.
 func TestZshHookPassesStateAsOneShotEnvVar(t *testing.T) {
 	script, err := ZshHook()
 	if err != nil {
@@ -379,8 +369,7 @@ func TestExportAppliesSymlinkedConfig(t *testing.T) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// State roots are canonical (macOS symlinks TMPDIR), so canonicalize the
-	// expected root the same way BuildExportScript will.
+	// State roots are canonical (macOS symlinks TMPDIR).
 	if c, err := filepath.EvalSymlinks(root); err == nil {
 		root = c
 	}
@@ -408,8 +397,7 @@ func TestExportAppliesSymlinkedConfig(t *testing.T) {
 }
 
 // An edit that gets re-trusted between two prompts must reapply: only the
-// fingerprint distinguishes it, because the root never changed and the
-// untrusted intermediate state is never observed.
+// fingerprint distinguishes it, since the root never changed.
 func TestExportReappliesAfterEditAndRetrust(t *testing.T) {
 	t.Setenv(stateEnvKey, "")
 	root := newWorkspaceDir(t, `{"env": {"FOO": "old"}}`)
@@ -430,9 +418,8 @@ func TestExportReappliesAfterEditAndRetrust(t *testing.T) {
 	}
 }
 
-// In expand mode config values are zsh double-quoted source text: $HOME etc.
-// must reach the shell unexpanded and unescaped, while the automatic
-// WORKSPACE_PATH is a real path and stays literal.
+// In expand mode config values are zsh double-quoted source text: $HOME must
+// reach the shell unexpanded, while WORKSPACE_PATH stays literal.
 func TestExportConfigValuesExpandInShell(t *testing.T) {
 	t.Setenv(stateEnvKey, "")
 	root := newWorkspaceDir(t, `{"expand": true, "env": {"HOGE": "$HOME/fuga"}}`)
@@ -490,8 +477,7 @@ func TestFindDirenvFile(t *testing.T) {
 }
 
 // The state export must be the final line: if the emitting process dies
-// mid-write, the shell evals a script whose state was never committed, and
-// the next evaluation simply redoes the whole (idempotent) transition.
+// mid-write, the next evaluation redoes the whole (idempotent) transition.
 func TestExportCommitsStateLast(t *testing.T) {
 	t.Setenv(stateEnvKey, "")
 	root := newWorkspaceDir(t, `{"env": {"SSH_AUTH_SOCK": "/1password/agent.sock"}}`)
@@ -503,9 +489,8 @@ func TestExportCommitsStateLast(t *testing.T) {
 	}
 }
 
-// Regression guard: state must never be re-exported. An exported
-// __SALLYPORT_STATE would be inherited by every child process the
-// workspace starts, defeating the isolation stateShellVar exists for.
+// State must never be re-exported: an exported __SALLYPORT_STATE would be
+// inherited by every child process the workspace starts.
 func TestExportNeverExportsState(t *testing.T) {
 	t.Setenv(stateEnvKey, "")
 	root := newWorkspaceDir(t, `{"env": {"SSH_AUTH_SOCK": "/1password/agent.sock"}}`)
@@ -523,10 +508,9 @@ func TestExportNeverExportsState(t *testing.T) {
 	}
 }
 
-// Regression guard: leaving a workspace must clear the state global by
-// assignment, never `unset`. Under `setopt nounset` a later "${__sallyport_state}"
-// reference to an unset global aborts the hook with `parameter not set`, which
-// stops it permanently.
+// Leaving a workspace must clear the state global by assignment, never `unset`:
+// under `setopt nounset` a later reference to an unset global aborts the hook
+// with `parameter not set`, which stops it permanently.
 func TestExportLeaveClearsStateWithoutUnset(t *testing.T) {
 	orig := "/original/agent.sock"
 	setState(t, state{Root: "/somewhere/demo", Saved: map[string]*string{"SSH_AUTH_SOCK": &orig}})
@@ -540,8 +524,8 @@ func TestExportLeaveClearsStateWithoutUnset(t *testing.T) {
 	}
 }
 
-// Regression guard: the shim must read the state global with a default so
-// `setopt nounset` cannot abort the hook, and must never reference it bare.
+// The shim must read the state global with a default so `setopt nounset` cannot
+// abort the hook.
 func TestZshHookStateReferenceIsNounsetSafe(t *testing.T) {
 	script, err := ZshHook()
 	if err != nil {
@@ -555,9 +539,8 @@ func TestZshHookStateReferenceIsNounsetSafe(t *testing.T) {
 	}
 }
 
-// Regression guard: masking SIGINT must be confined with localtraps so a
-// user-defined INT trap is restored on return, not clobbered. The old
-// `trap - SIGINT` reset it to the default.
+// Masking SIGINT must be confined with localtraps so a user-defined INT trap is
+// restored on return; `trap - SIGINT` would reset it to the default.
 func TestZshHookPreservesUserIntTrap(t *testing.T) {
 	script, err := ZshHook()
 	if err != nil {
@@ -571,9 +554,8 @@ func TestZshHookPreservesUserIntTrap(t *testing.T) {
 	}
 }
 
-// Drive the real shim under zsh to prove the two shell-level fixes: a
-// user-defined INT trap survives a hook run (localtraps), and running the hook
-// under `setopt nounset` after the state global was cleared does not abort.
+// Drive the real shim under zsh: a user-defined INT trap survives a hook run,
+// and the hook does not abort under `setopt nounset` with a cleared state.
 func TestZshHookRealZshBehavior(t *testing.T) {
 	zsh, err := exec.LookPath("zsh")
 	if err != nil {
@@ -584,8 +566,8 @@ func TestZshHookRealZshBehavior(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Replace the eval line with a no-op: this test exercises the shell
-	// mechanics (trap/nounset), not the binary, which is not built here.
+	// This test exercises the shell mechanics, not the binary, which is not built
+	// here.
 	lines := strings.Split(shim, "\n")
 	for i, l := range lines {
 		if strings.Contains(l, "eval \"$(") {
@@ -613,12 +595,10 @@ print "nounset-ok"
 		t.Fatalf("zsh run failed: %v\n%s", err, out)
 	}
 	got := string(out)
-	// The user INT trap must still be registered after the hook returns; the
-	// listing carries its command body only if it survived.
+	// The listing carries the trap's command body only if it survived.
 	if !strings.Contains(got, "trap -- 'print USERTRAP' INT") {
 		t.Errorf("user INT trap was clobbered by the hook:\n%s", got)
 	}
-	// The hook must complete under nounset with an empty state global.
 	if !strings.Contains(got, "nounset-ok") {
 		t.Errorf("hook aborted under nounset:\n%s", got)
 	}
@@ -626,11 +606,8 @@ print "nounset-ok"
 
 // hostileBinaryPaths are directory names an installed sallyport can plausibly
 // sit under, each carrying a character the shell would act on if the shim did
-// not quote the path: $ and ` expand, " ends a double-quoted string, and an
-// apostrophe ends a single-quoted one (/Users/o'brien/bin, "Bob's Tools"). ! is
-// history expansion, ; and & are command separators, and a space merely has to
-// survive. Each broke, or could break, a different quoting mistake, so they are
-// exercised together rather than picked one at a time.
+// not quote the path: $ and ` expand, " and ' end a quoted string, ! is history
+// expansion, ; and & are command separators, and a space merely has to survive.
 var hostileBinaryPaths = []string{
 	`a$b`,
 	"c`d",
@@ -642,20 +619,14 @@ var hostileBinaryPaths = []string{
 	"a$b`c d'e\"f;g",
 }
 
-// Regression guard, kept cheap so it still runs where zsh is unavailable: for a
-// path whose characters need escaping under any quoting scheme, the shim must
-// not carry the path verbatim. It deliberately does not compare against
-// zshQuote's output — that only asks whether the bytes match the helper the
-// implementation happens to use, and passes just as happily for a wrapper that
-// puts bare single quotes around the path, which dies on the first apostrophe.
-// Requiring the path to have been altered catches both that and no quoting at
-// all, while leaving a differently-but-correctly quoting implementation free.
-// TestZshHookRealZshRunsBinaryAtHostilePath is what actually judges
-// correctness.
+// Kept cheap so it still runs where zsh is unavailable. It deliberately does not
+// compare against zshQuote's output: that would pass just as happily for a
+// wrapper putting bare single quotes around the path, which dies on the first
+// apostrophe. Requiring the path to have been altered catches that while
+// leaving a differently-but-correctly quoting implementation free.
 func TestZshHookQuotesBinaryPath(t *testing.T) {
-	// Contains both an apostrophe and a $, so every quoting scheme has to
-	// escape something: single-quoting must break up the apostrophe, and
-	// double-quoting must escape the $.
+	// Contains both an apostrophe and a $, so every quoting scheme has to escape
+	// something.
 	const self = `/opt/o'brien/a$b/sallyport`
 	script := zshHookFor(self)
 	if strings.Contains(script, self) {
@@ -665,16 +636,12 @@ func TestZshHookQuotesBinaryPath(t *testing.T) {
 
 // The real judge: for every hostile path, plant a stand-in binary there, render
 // the shim for that exact path, and let zsh run the hook. The assertion is
-// purely behavioural — did zsh manage to exec the file — so any correct
-// quoting scheme passes and any broken one fails, regardless of shape.
-//
-// The stand-in is reached through the shim's own `eval "$( ... )"`, so this
-// exercises the real nested quoting context rather than a hand-written
-// approximation. Rendering with zshHookFor is also what keeps the failure mode
-// contained: an earlier version patched the path into ZshHook's output with
-// strings.Replace, and when that silently matched nothing the shim invoked the
-// test binary itself, which re-ran the whole suite — hundreds of nested
-// processes outliving `go test`, all reported as a quoting error.
+// purely behavioural — did zsh manage to exec the file — so any correct quoting
+// scheme passes and any broken one fails. The stand-in is reached through the
+// shim's own `eval "$( ... )"`, so this exercises the real nested quoting
+// context rather than a hand-written approximation. Render the shim rather than
+// patching a path into ZshHook's output: a substitution that matches nothing
+// leaves the shim invoking the test binary, which re-runs the whole suite.
 func TestZshHookRealZshRunsBinaryAtHostilePath(t *testing.T) {
 	zsh, err := exec.LookPath("zsh")
 	if err != nil {
@@ -687,17 +654,15 @@ func TestZshHookRealZshRunsBinaryAtHostilePath(t *testing.T) {
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				t.Fatal(err)
 			}
-			// The stand-in only has to be executable and print something the
-			// hook can eval; whether zsh resolves the path is the whole test.
+			// The stand-in only has to be executable and print something evalable.
 			fake := filepath.Join(dir, "sallyport")
 			if err := os.WriteFile(fake, []byte("#!/bin/sh\nprintf 'export SALLYPORT_PROBE=ok\\n'\n"), 0o755); err != nil {
 				t.Fatal(err)
 			}
 
-			// Bounded: a broken quoting can leave zsh waiting on a command
-			// substitution the path opened, and WaitDelay caps the wait on the
-			// output pipe afterwards, so a regression reports instead of
-			// hanging the test binary.
+			// Broken quoting can leave zsh waiting on a command substitution the
+			// path opened; WaitDelay caps the wait on the output pipe afterwards,
+			// so a regression reports instead of hanging the test binary.
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, zsh, "-c", zshHookFor(fake)+`
@@ -723,8 +688,7 @@ printf 'PROBE=%s\n' "${SALLYPORT_PROBE-<unset>}"
 			if !strings.Contains(got, "PROBE=ok") {
 				t.Errorf("hook did not run the binary at %q:\n%s", dir, got)
 			}
-			// A path is data, never something the shell gets to execute: the
-			// `;touch OOPS;` case would leave this file behind if it were.
+			// The `;touch OOPS;` case leaves this file behind if the path was run.
 			if _, err := os.Stat(filepath.Join(dir, "OOPS")); err == nil {
 				t.Errorf("the binary path was executed as a command for %q", dir)
 			}
@@ -733,8 +697,7 @@ printf 'PROBE=%s\n' "${SALLYPORT_PROBE-<unset>}"
 }
 
 // The untrusted warning is silenced on quiet (per-prompt) calls unless the
-// workspace being rolled back is the one currently applied, in which case a
-// silent rollback would confuse the user.
+// workspace being rolled back is the one currently applied.
 func TestExportUntrustedWarningGating(t *testing.T) {
 	root := newUntrustedWorkspaceDir(t, `{"env": {"OP_ACCOUNT": "x"}}`)
 
@@ -770,9 +733,7 @@ func TestExportUntrustedWarningGating(t *testing.T) {
 }
 
 // An insecure trust store is treated like an untrusted workspace: nothing is
-// applied, the previous workspace is still rolled back, and the warning follows
-// the same gating (silenced under quiet unless the applied workspace is the one
-// that can no longer be trusted).
+// applied and the warning follows the same gating.
 func TestExportUnsafeTrustStoreWarningGating(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("root bypasses ownership and permission checks")
@@ -868,7 +829,6 @@ func TestExportDirenvCoexistenceWarningGating(t *testing.T) {
 }
 
 func TestExportCorruptStateWarns(t *testing.T) {
-	// A value that is not valid base64 cannot be decoded.
 	t.Setenv(stateEnvKey, "!!!not-base64!!!")
 	res, err := BuildExportScript(t.TempDir(), false)
 	if err != nil {
@@ -879,9 +839,8 @@ func TestExportCorruptStateWarns(t *testing.T) {
 	}
 }
 
-// A state written by a different sallyport version (here: no schema field) must
-// warn on a non-quiet call, be suppressed on quiet, and still have its
-// recovered originals applied — the mismatch is best-effort, not a reset.
+// A state written by a different sallyport version must still have its recovered
+// originals applied: the mismatch is best-effort, not a reset.
 func TestExportSchemaMismatchWarnsButKeepsState(t *testing.T) {
 	// Legacy blob: a previous workspace's saved original, no schema field.
 	legacy := base64.StdEncoding.EncodeToString([]byte(
@@ -895,8 +854,7 @@ func TestExportSchemaMismatchWarnsButKeepsState(t *testing.T) {
 	if !hasWarning(res.Warnings, "different sallyport version") {
 		t.Errorf("expected schema-mismatch warning: %v", res.Warnings)
 	}
-	// Best-effort: the recovered original is still rolled back despite the
-	// mismatch, rather than discarded like a corrupt state.
+	// Rolled back despite the mismatch, rather than discarded like a corrupt state.
 	if !strings.Contains(res.Script, "export SSH_AUTH_SOCK='/original/agent.sock'") {
 		t.Errorf("legacy state's originals were not applied:\n%s", res.Script)
 	}
@@ -920,8 +878,7 @@ func TestDecodeState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A state this binary just encoded carries the current schema, so it must
-	// round-trip without a mismatch.
+	// A state this binary just encoded carries the current schema.
 	if s, mismatch, err := decodeState(enc); err != nil || mismatch || s.Root != "/x" || s.Fingerprint != "fp" {
 		t.Errorf("roundtrip: state=%v mismatch=%v err=%v", s, mismatch, err)
 	}
@@ -934,11 +891,9 @@ func TestDecodeState(t *testing.T) {
 	}
 }
 
-// stateSchemaString pins the state wire layout. If you change the state struct
-// (add, remove, rename, or retype a field) this string changes and the test
-// fails on purpose — decide whether the change is wire-compatible before
-// updating `want`. Go's json ignores unknown fields and zero-fills missing
-// ones, so ADDING an optional field is compatible; but when you change the
+// This pins the state wire layout: changing the state struct changes the string
+// and fails the test on purpose. Go's json ignores unknown fields and zero-fills
+// missing ones, so ADDING an optional field is compatible; when you change the
 // MEANING of an existing field you MUST also change its JSON field name, so old
 // state reads as a (safe) missing field instead of being silently misread.
 func TestStateSchemaString(t *testing.T) {
@@ -948,9 +903,8 @@ func TestStateSchemaString(t *testing.T) {
 	}
 }
 
-// A state written by a different layout (here: no schema field, as older
-// sallyport wrote) must decode, be flagged as a mismatch, and still yield its
-// recovered originals — Go zero-fills the missing schema and keeps the rest.
+// A state written by a different layout must decode, be flagged as a mismatch,
+// and still yield its recovered originals.
 func TestDecodeStateSchemaMismatchKeepsData(t *testing.T) {
 	legacy := base64.StdEncoding.EncodeToString([]byte(`{"root":"/x","saved":{"FOO":null}}`))
 	s, mismatch, err := decodeState(legacy)
@@ -968,9 +922,7 @@ func TestDecodeStateSchemaMismatchKeepsData(t *testing.T) {
 	}
 }
 
-// renderScript is pure, so it can be exercised directly: restores precede
-// applies, literals are single-quoted while config values stay verbatim
-// double-quoted source, and the state line is always last.
+// renderScript is pure, so it can be exercised directly.
 func TestRenderScript(t *testing.T) {
 	orig := "/old/sock"
 	saved := map[string]*string{"KEEP": &orig, "GONE": nil}
@@ -1000,8 +952,7 @@ func TestRenderScript(t *testing.T) {
 	}
 }
 
-// End-to-end: the generated enter/leave scripts must actually eval in zsh,
-// applying literal values, expanding config values, and restoring on leave.
+// End-to-end: the generated enter/leave scripts must actually eval in zsh.
 func TestExportScriptEvalsInZsh(t *testing.T) {
 	zsh, err := exec.LookPath("zsh")
 	if err != nil {
@@ -1012,7 +963,6 @@ func TestExportScriptEvalsInZsh(t *testing.T) {
 	_ = os.Unsetenv("OP_ACCOUNT")
 	_ = os.Unsetenv("HOGE")
 	_ = os.Unsetenv("WORKSPACE_PATH")
-	// expand mode so the shell expands $HOME in the value below.
 	root := newWorkspaceDir(t, `{"expand": true, "env": {"OP_ACCOUNT": "acct.example.com", "HOGE": "$HOME/fuga"}}`)
 
 	enter := mustBuild(t, root, false)

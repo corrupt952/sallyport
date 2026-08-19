@@ -8,8 +8,6 @@ import (
 	"github.com/google/subcommands"
 )
 
-// fail must write to the injected writer so tests can assert on error output
-// without touching the real stderr.
 func TestFailWritesToInjectedWriter(t *testing.T) {
 	var buf bytes.Buffer
 	errOut = &buf

@@ -11,8 +11,7 @@ import (
 
 // errOut receives command-level error messages. A nil value is resolved to
 // os.Stderr on each call rather than captured once, so a caller that swaps the
-// real stderr is still honored; tests set it to a buffer to assert on failure
-// messages.
+// real stderr is still honored.
 var errOut io.Writer
 
 func fail(err error) subcommands.ExitStatus {

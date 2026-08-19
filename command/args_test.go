@@ -9,8 +9,6 @@ import (
 	"github.com/google/subcommands"
 )
 
-// silenceOutput redirects stdout/stderr to /dev/null for the duration of a test,
-// so a command's usage text and script output don't clutter the test log.
 func silenceOutput(t *testing.T) {
 	t.Helper()
 	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
@@ -25,8 +23,7 @@ func silenceOutput(t *testing.T) {
 	})
 }
 
-// runCommand parses args into a fresh FlagSet the way subcommands.Execute would,
-// then invokes the command directly.
+// runCommand parses args into a fresh FlagSet the way subcommands.Execute would.
 func runCommand(t *testing.T, cmd subcommands.Command, args ...string) subcommands.ExitStatus {
 	t.Helper()
 	fs := flag.NewFlagSet(cmd.Name(), flag.ContinueOnError)
@@ -37,7 +34,6 @@ func runCommand(t *testing.T, cmd subcommands.Command, args ...string) subcomman
 	return cmd.Execute(context.Background(), fs)
 }
 
-// TestShellArgValidation covers export/hook, which demand exactly one "zsh" arg.
 func TestShellArgValidation(t *testing.T) {
 	silenceOutput(t)
 	cmds := map[string]subcommands.Command{
@@ -58,7 +54,6 @@ func TestShellArgValidation(t *testing.T) {
 	}
 }
 
-// TestNoArgCommandsRejectExtraArgs covers commands that take no positional args.
 func TestNoArgCommandsRejectExtraArgs(t *testing.T) {
 	silenceOutput(t)
 	cmds := map[string]subcommands.Command{
@@ -75,8 +70,7 @@ func TestNoArgCommandsRejectExtraArgs(t *testing.T) {
 	}
 }
 
-// TestVersionSucceeds guards the happy path so the added arg check doesn't
-// accidentally reject the normal invocation.
+// Guards the happy path against an over-eager arg check.
 func TestVersionSucceeds(t *testing.T) {
 	silenceOutput(t)
 	if got := runCommand(t, &VersionCommand{}); got != subcommands.ExitSuccess {

@@ -14,68 +14,50 @@ import (
 	"strings"
 )
 
-// stateEnvKey is the environment variable the binary reads its state from
-// (decodeState). The shell never exports it: it keeps the encoded value in
-// stateShellVar, a non-exported global, and the hook passes it in as this
-// env var only for the single invocation that calls the binary. Nothing
-// else ever sees it, so it cannot leak into child processes.
+// stateEnvKey is the env var the binary reads its state from. The shell never
+// exports it: the hook passes it in for the single invocation that calls the
+// binary, so it cannot leak into child processes.
 const stateEnvKey = "__SALLYPORT_STATE"
 
-// stateShellVar is the non-exported zsh global the hook stores the encoded
-// state in between invocations.
 const stateShellVar = "__sallyport_state"
 
-// state carries the pre-workspace values of everything sallyport overwrote,
-// so leaving a workspace restores the shell instead of leaking values into
-// it. Because it lives in a non-exported shell variable, a shell started
-// inside a workspace does not inherit its parent's state: that child's
-// first hook invocation sees no state and records the workspace-applied
-// environment it inherited as its own baseline. So each shell restores to
-// the environment it was born into, not necessarily the environment from
-// before sallyport ever ran.
+// state carries the pre-workspace values of everything sallyport overwrote, so
+// leaving a workspace restores the shell instead of leaking values into it.
+// Because the shell variable holding it is not exported, a shell started inside
+// a workspace sees no state and takes the environment it inherited as its own
+// baseline: each shell restores to the environment it was born into, not to the
+// one from before sallyport ever ran.
 type state struct {
 	Root string `json:"root"`
-	// Fingerprint of the config bytes that were applied. Comparing the root
-	// alone misses an edit that gets re-trusted between two prompts: the
-	// untrusted intermediate state is never observed, so without this the old
-	// values would stay applied until the workspace is left.
+	// Fingerprint of the config bytes that were applied. Comparing the root alone
+	// misses an edit that gets re-trusted between two prompts, since the
+	// untrusted intermediate state is never observed.
 	Fingerprint string `json:"fingerprint,omitempty"`
 	// nil means the variable did not exist before sallyport touched it.
 	Saved map[string]*string `json:"saved"`
 	// Schema is a hash of this struct's wire layout, stamped by encodeState and
-	// checked by decodeState. It lets a new binary notice that a running shell's
-	// state was written by a different sallyport version (see stateSchema). It
-	// is metadata, not data, so it is excluded from the schema computation
-	// itself.
+	// checked by decodeState (see stateSchema). It is metadata, not data, so it
+	// is excluded from the schema computation itself.
 	Schema string `json:"schema,omitempty"`
 }
 
-// ZshHook returns the shim for .zshrc. All logic stays in the binary; the
-// shim only evals `sallyport export zsh` output. It must never propagate an error:
-// zsh stops running subsequent chpwd hooks when one fails, which would break
-// unrelated plugins. SIGINT is masked around the eval so a Ctrl-C cannot stop
-// it halfway and leave the environment and stateShellVar inconsistent; the
-// mask is confined with `localtraps` so a user-defined INT trap is restored on
-// return instead of being reset to the default.
+// ZshHook returns the shim for .zshrc. It must never propagate an error: zsh
+// stops running subsequent chpwd hooks when one fails, which would break
+// unrelated plugins.
 //
-// stateShellVar is declared with `typeset -g` (non-exported) rather than
-// exported: an exported state would be inherited by every child process the
-// workspace starts, defeating the point of an isolated workspace. The hook
-// instead passes it to the binary as stateEnvKey for the duration of a
-// single invocation, using zsh's one-shot command-prefix assignment; that
-// assignment is process-local and never touches the shell's own
-// environment or its other children.
+// stateShellVar is declared non-exported: an exported state would be inherited
+// by every child process the workspace starts, defeating the isolation. The
+// hook instead passes it to the binary as stateEnvKey through zsh's one-shot
+// command-prefix assignment, which is process-local.
 //
-// The hook runs on precmd as well as chpwd so that trust/untrust and config
-// edits take effect on the next prompt without a directory change (the same
-// reason direnv hooks both). The precmd variant passes -quiet: repeating the
-// "not trusted" warning on every empty Enter would drown the prompt.
+// The hook runs on precmd as well as chpwd so trust/untrust and config edits
+// take effect on the next prompt without a directory change. The precmd variant
+// passes -quiet: repeating the "not trusted" warning on every empty Enter would
+// drown the prompt.
 //
-// The shim only registers and never applies immediately: applying while
-// .zshrc is still being sourced lets later export lines clobber workspace
-// values (frozen in by the fast path), and records pre-.zshrc values as the
-// originals to restore. Deferring to the first precmd, as direnv does, makes
-// the .zshrc order irrelevant.
+// The shim only registers and never applies immediately: applying while .zshrc
+// is still being sourced lets later export lines clobber workspace values, and
+// records pre-.zshrc values as the originals to restore.
 func ZshHook() (string, error) {
 	self, err := os.Executable()
 	if err != nil {
@@ -85,35 +67,26 @@ func ZshHook() (string, error) {
 }
 
 // zshHookFor renders the shim for a given binary path. It is split out from
-// ZshHook for one reason: os.Executable() cannot be substituted, and under
-// `go test` it is always a tame path like /tmp/.../workspace.test, so a test
-// driving ZshHook alone can never exercise the quoting for the characters that
-// actually break it. Tests call this with hostile paths instead.
+// ZshHook so tests can pass hostile paths: os.Executable() cannot be
+// substituted, and under `go test` it is always a tame path.
 //
 // The path is single-quoted with zshQuote rather than interpolated between
-// double quotes. Double quotes still expand $ and `, so a binary installed
-// under a path containing either would be mangled at every hook invocation:
-// `$b` in .../a$b/sallyport expands to nothing and the exec fails silently
-// (the hook swallows it and returns 0), and a backtick opens a command
-// substitution that breaks the shim's own parse, leaving _sallyport_hook
-// undefined. An apostrophe is just as fatal, which is why the quoting must go
-// through zshQuote — wrapping in bare single quotes would end the quote early
-// on a path like /Users/o'brien/bin. Single quotes are safe here even though
-// the eval's `$(...)` sits inside double quotes: a command substitution starts
-// a fresh quoting context, which is also why the "${...-}" below works.
+// double quotes, which would still expand $ and ` in the installed path; and
+// through zshQuote rather than bare single quotes, which a path like
+// /Users/o'brien/bin would end early. Single quotes are safe even though the
+// eval's `$(...)` sits inside double quotes: a command substitution starts a
+// fresh quoting context, which is also why the "${...-}" below works.
 func zshHookFor(self string) string {
 	return fmt.Sprintf(`typeset -g %[1]s
 _sallyport_hook() {
-  # localoptions/localtraps confine both the SIGINT mask and any option change
-  # to this function: zsh restores the caller's traps on return, so a
-  # user-defined INT trap survives instead of being reset to the default. The
-  # mask still guarantees a Ctrl-C cannot stop the eval halfway and leave the
-  # environment and stateShellVar inconsistent.
+  # The SIGINT mask keeps a Ctrl-C from stopping the eval halfway and leaving the
+  # environment and the state global inconsistent. localtraps confines it: zsh
+  # restores the caller's traps on return, so a user-defined INT trap survives
+  # instead of being reset to the default.
   setopt localoptions localtraps
   trap -- '' SIGINT
-  # ${...-} guards against setopt nounset: after a workspace is left the state
-  # global is set to '' (not unset), but a defensive default keeps the hook
-  # working even if some other code unset it.
+  # ${...-} guards against setopt nounset, which would abort the hook if some
+  # other code unset the state global.
   eval "$(%[2]s="${%[1]s-}" %[3]s export "$@" zsh)"
   return 0
 }
@@ -130,11 +103,9 @@ fi
 `, stateShellVar, stateEnvKey, zshQuote(self))
 }
 
-// ExportResult is the outcome of evaluating a directory: the shell script to
-// eval and any human-facing warnings. Warnings are returned as data, not
-// written to a stream, so the CLI decides where they go (stderr) and tests can
-// assert on them directly without capturing output. An empty Script means no
-// transition was needed.
+// ExportResult carries warnings as data rather than writing them to a stream,
+// so the CLI decides where they go. An empty Script means no transition was
+// needed.
 type ExportResult struct {
 	Script   string
 	Warnings []string
@@ -142,25 +113,18 @@ type ExportResult struct {
 
 // BuildExportScript emits the env diff for pwd; no change emits an empty
 // script. quiet suppresses the informational warnings for the per-prompt
-// (precmd) calls. It reads the state from the environment and the config from
-// disk, but performs no output of its own: the script and warnings come back
-// as data.
+// (precmd) calls.
 func BuildExportScript(pwd string, quiet bool) (ExportResult, error) {
 	var warnings []string
 
 	st, schemaMismatch, err := decodeState(os.Getenv(stateEnvKey))
 	if err != nil {
-		// Corruption is not silently absorbed: the saved originals are gone, so
-		// the user must know their pre-workspace environment can no longer be
-		// restored.
 		warnings = append(warnings, corruptStateWarning)
 		st = state{}
 	} else if schemaMismatch && !quiet {
-		// The state decoded but came from a different state layout; the recovered
-		// originals may be misread. We keep using them (best-effort), but say so.
-		// Gated on !quiet like the other prompt warnings, and self-healing: the
-		// first transition through encodeState re-stamps the current schema, so
-		// the warning stops on its own.
+		// The recovered originals may be misread; they are still used
+		// (best-effort). Self-healing: the first transition through encodeState
+		// re-stamps the current schema, so the warning stops on its own.
 		warnings = append(warnings, schemaMismatchWarning)
 	}
 
@@ -176,20 +140,16 @@ func BuildExportScript(pwd string, quiet bool) (ExportResult, error) {
 	if root != "" {
 		switch cfg, loadedFP, err := LoadTrustedConfig(ConfigPath(root)); {
 		case errors.Is(err, ErrUnsafeTrustStore):
-			// The store itself is tampering-exposed, so no grant it holds can be
-			// trusted; treat the workspace as if it did not exist. Same rollback
-			// and warning gating as the untrusted case: a silent rollback of an
-			// applied workspace would confuse the user.
+			// No grant the store holds can be trusted; treat the workspace as if it
+			// did not exist, with the same gating as the untrusted case below.
 			if !quiet || root == st.Root {
 				warnings = append(warnings, fmt.Sprintf("sallyport: %v; refusing to apply %s", err, ConfigPath(root)))
 			}
 			root = ""
 		case errors.Is(err, ErrUntrusted):
-			// Treated as if the workspace did not exist: the previous
-			// workspace still gets restored, but nothing is applied. The
-			// warning is forced through quiet when the grant was revoked
-			// while the workspace is applied — a silent rollback of the
-			// user's environment would be confusing.
+			// The previous workspace still gets restored, but nothing is applied.
+			// The warning is forced through quiet when the grant was revoked while
+			// this workspace is applied: a silent rollback would confuse the user.
 			if !quiet || root == st.Root {
 				warnings = append(warnings, fmt.Sprintf("sallyport: %s is not trusted; run `sallyport trust` inside it", ConfigPath(root)))
 			}
@@ -203,9 +163,8 @@ func BuildExportScript(pwd string, quiet bool) (ExportResult, error) {
 		default:
 			vars = WorkspaceVars(root, cfg)
 			fp = loadedFP
-			// direnv and sallyport are unaware of each other and would fight
-			// over shared variables non-deterministically; make coexistence
-			// visible instead of mysterious.
+			// direnv and sallyport are unaware of each other and would fight over
+			// shared variables non-deterministically.
 			if envrc := findDirenvFile(root); envrc != "" && !quiet {
 				warnings = append(warnings, fmt.Sprintf("sallyport: %s is also managed by direnv (%s); shared variables will conflict", root, envrc))
 			}
@@ -226,9 +185,9 @@ func BuildExportScript(pwd string, quiet bool) (ExportResult, error) {
 		if err != nil {
 			return ExportResult{}, err
 		}
-		// typeset -g, not export: this eval runs inside _sallyport_hook, so a
-		// plain assignment would be scoped to the function. The state itself
-		// must stay non-exported (see stateShellVar).
+		// typeset -g, not export: this eval runs inside _sallyport_hook, so a plain
+		// assignment would be scoped to the function, and the state must stay
+		// non-exported (see ZshHook).
 		stateLine = fmt.Sprintf("typeset -g %s=%s\n", stateShellVar, zshQuote(encoded))
 	}
 
@@ -236,10 +195,9 @@ func BuildExportScript(pwd string, quiet bool) (ExportResult, error) {
 }
 
 // captureSaved records, for each variable about to be applied, the value that
-// leaving the workspace must restore: the pre-sallyport original (already held
-// in st when switching workspaces) or the current environment value, or nil
-// when the variable is currently unset. The recorded original must predate
-// sallyport entirely, which is why a hit in st.Saved wins over the live env.
+// leaving the workspace must restore; nil when it is currently unset. The
+// recorded original must predate sallyport entirely, which is why a hit in
+// st.Saved wins over the live environment.
 func captureSaved(st state, vars []EnvVar) map[string]*string {
 	saved := map[string]*string{}
 	for _, v := range vars {
@@ -255,13 +213,11 @@ func captureSaved(st state, vars []EnvVar) map[string]*string {
 	return saved
 }
 
-// renderScript is pure: given the originals to restore, the variables to apply,
-// and the pre-built state-commit line, it always produces the same bytes.
-// Restores are emitted before applies so a workspace-to-workspace switch ends
-// with the new workspace's values for overlapping keys. stateLine is emitted
-// last: if the process dies mid-write, the shell evals a script whose state was
-// never committed, and the next evaluation redoes the whole idempotent
-// transition.
+// renderScript emits restores before applies, so a workspace-to-workspace
+// switch ends with the new workspace's values for overlapping keys. stateLine
+// goes last: if the process dies mid-write, the shell evals a script whose
+// state was never committed, and the next evaluation redoes the whole
+// idempotent transition.
 func renderScript(saved map[string]*string, vars []EnvVar, stateLine string) string {
 	var b strings.Builder
 
@@ -282,9 +238,9 @@ func renderScript(saved map[string]*string, vars []EnvVar, stateLine string) str
 		if v.Literal {
 			fmt.Fprintf(&b, "export %s=%s\n", v.Key, zshQuote(v.Val))
 		} else {
-			// Config values are emitted verbatim between double quotes: the
-			// value is zsh double-quoted source text and the shell owns its
-			// expansion semantics, escapes included (see EnvVar.Literal).
+			// Emitted verbatim between double quotes: the value is zsh
+			// double-quoted source text and the shell owns its expansion
+			// semantics, escapes included (see EnvVar.Literal).
 			fmt.Fprintf(&b, "export %s=\"%s\"\n", v.Key, v.Val)
 		}
 	}
@@ -293,7 +249,6 @@ func renderScript(saved map[string]*string, vars []EnvVar, stateLine string) str
 	return b.String()
 }
 
-// findDirenvFile returns the nearest .envrc at root or above, or "".
 func findDirenvFile(dir string) string {
 	d := filepath.Clean(dir)
 	for {
@@ -309,31 +264,25 @@ func findDirenvFile(dir string) string {
 	}
 }
 
-// corruptStateWarning is surfaced when the encoded state cannot be decoded.
 const corruptStateWarning = "sallyport: " + stateEnvKey + " is corrupted; the pre-workspace environment cannot be restored"
 
-// schemaMismatchWarning is surfaced when a decoded state's schema does not
-// match this binary's. It self-heals: the next transition re-encodes the state
-// with the current schema, so the warning stops appearing after that.
 const schemaMismatchWarning = "sallyport: " + stateEnvKey + " was written by a different sallyport version; interpreting best-effort"
 
-// stateSchema is a short hash of the state struct's wire layout, computed once
-// at startup. json.Unmarshal never errors on a structural mismatch — it drops
-// unknown fields and zero-fills missing ones — so a change to the meaning or
-// type of a field would let a new binary silently misread state written by an
-// old one (the class of bug that bit shadowenv across 2.x->3.x). Stamping this
-// hash into every state and checking it on decode turns that silent
-// misinterpretation into an explicit best-effort warning.
+// stateSchema is a short hash of the state struct's wire layout. json.Unmarshal
+// never errors on a structural mismatch — it drops unknown fields and zero-fills
+// missing ones — so a change to the meaning or type of a field would let a new
+// binary silently misread state written by an old one. Stamping this hash into
+// every state turns that into an explicit best-effort warning.
 var stateSchema = func() string {
 	sum := sha256.Sum256([]byte(stateSchemaString()))
 	return hex.EncodeToString(sum[:])[:12]
 }()
 
-// stateSchemaString is the canonical description of the state wire layout: each
-// data field's JSON name paired with its normalized Go type, sorted so field
-// order (which JSON does not care about) is not mistaken for a change. The
-// Schema field itself is metadata and excluded. A golden test pins this string
-// so any edit to the state struct forces a compatibility decision.
+// stateSchemaString pairs each data field's JSON name with its normalized Go
+// type, sorted so field order (which JSON does not care about) is not mistaken
+// for a change. The Schema field itself is metadata and excluded. A golden test
+// pins this string so any edit to the state struct forces a compatibility
+// decision.
 func stateSchemaString() string {
 	t := reflect.TypeOf(state{})
 	parts := make([]string, 0, t.NumField())
@@ -349,13 +298,11 @@ func stateSchemaString() string {
 	return strings.Join(parts, ",")
 }
 
-// decodeState parses the base64+JSON state blob. It is pure. The bool reports a
-// schema mismatch: the blob decoded, but its schema differs from this binary's
-// (or predates the schema field entirely), so the recovered originals may be
-// misread. The caller still uses the decoded state — Go ignores unknown fields
-// and zero-fills missing ones, so a wire-compatible change survives — but should
-// warn. The empty string is "no state" (also how the hook clears state on
-// leave) and never a mismatch; a genuine decode failure is returned as an error.
+// decodeState parses the base64+JSON state blob. The bool reports a schema
+// mismatch: the blob decoded, but its schema differs from this binary's (or
+// predates the schema field), so the recovered originals may be misread while
+// still being usable. The empty string is "no state" (how the hook clears state
+// on leave) and never a mismatch.
 func decodeState(raw string) (state, bool, error) {
 	if raw == "" {
 		return state{}, false, nil
@@ -372,8 +319,6 @@ func decodeState(raw string) (state, bool, error) {
 }
 
 func encodeState(s state) (string, error) {
-	// Stamp the current schema so a future binary can tell whether this state
-	// matches its own layout (see stateSchema).
 	s.Schema = stateSchema
 	data, err := json.Marshal(s)
 	if err != nil {

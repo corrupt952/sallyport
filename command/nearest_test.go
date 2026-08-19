@@ -68,9 +68,6 @@ func TestNearestConfigRejectsExtraArgs(t *testing.T) {
 	}
 }
 
-// TestTrustUntrustCommands exercises the full command path against a real,
-// isolated workspace: XDG_DATA_HOME is redirected to a temp dir so trust
-// records never touch the real home.
 func TestTrustUntrustCommands(t *testing.T) {
 	silenceOutput(t)
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
