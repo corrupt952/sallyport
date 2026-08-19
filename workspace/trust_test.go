@@ -2,8 +2,11 @@ package workspace
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -58,8 +61,163 @@ func TestTrustRejectsBrokenConfig(t *testing.T) {
 
 func TestUntrustWithoutGrant(t *testing.T) {
 	path := trustSetup(t)
-	if err := Untrust(path); err == nil {
+	// Nothing has been trusted yet, so the store does not even exist. A missing
+	// store holds no grants, which is the ordinary "never trusted" answer and
+	// must read as such rather than as a failure to look.
+	err := Untrust(path)
+	if err == nil {
 		t.Fatal("expected error when untrusting an unapproved config")
+	}
+	if !strings.HasPrefix(err.Error(), "not trusted:") {
+		t.Fatalf("missing store: got %v, want a not-trusted error", err)
+	}
+}
+
+func TestUntrustWithStoreHoldingNoMatch(t *testing.T) {
+	other := trustSetup(t)
+	if err := Trust(other); err != nil {
+		t.Fatal(err)
+	}
+	// A second workspace nobody approved. The store now exists and lists fine,
+	// so this is the no-match verdict rather than the missing store above — the
+	// ordinary way "not trusted" is reached, and the case the store-missing
+	// branch defers to.
+	dir := t.TempDir()
+	writeConfig(t, dir, `{"env": {}}`)
+
+	err := Untrust(ConfigPath(dir))
+	if err == nil {
+		t.Fatal("expected error when no record matches the config")
+	}
+	if !strings.HasPrefix(err.Error(), "not trusted:") {
+		t.Fatalf("no matching record: got %v, want a not-trusted error", err)
+	}
+	if !IsTrusted(other) {
+		t.Error("untrusting an unapproved config revoked another config's grant")
+	}
+}
+
+func TestUntrustReportsUnlistableStore(t *testing.T) {
+	skipIfRoot(t)
+	path := trustSetup(t)
+	if err := Trust(path); err != nil {
+		t.Fatal(err)
+	}
+	// A store the user cannot read still passes verifyTrustStore: it is owned by
+	// the user and writable by nobody else, which is all that check demands. The
+	// failure therefore only surfaces when the records are listed, and the grant
+	// is still on disk at that point, so answering "not trusted" would deny a
+	// trust that exists and point the user at the wrong problem.
+	store := trustDir()
+	if err := os.Chmod(store, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	// Restore before t.TempDir's cleanup, which cannot remove an unreadable dir.
+	t.Cleanup(func() { _ = os.Chmod(store, 0o700) })
+
+	err := Untrust(path)
+	if err == nil {
+		t.Fatal("expected error when the trust store cannot be listed")
+	}
+	// The property is that no listing failure is answered with the verdict; an
+	// assertion on the errno alone would still accept an implementation that
+	// singles out EACCES and keeps lying about every other failure.
+	if strings.HasPrefix(err.Error(), "not trusted:") {
+		t.Fatalf("unreadable store reported as not trusted: %v", err)
+	}
+	// Naming the store is what tells the user which directory to chmod, so the
+	// real failure has to come through rather than a stand-in built from scratch.
+	if !strings.Contains(err.Error(), store) {
+		t.Errorf("got %v, want the underlying failure naming %s", err, store)
+	}
+	if !errors.Is(err, os.ErrPermission) {
+		t.Errorf("got %v, want the underlying permission error", err)
+	}
+}
+
+func TestUntrustSurfacesNonPermissionListingFailure(t *testing.T) {
+	path := trustSetup(t)
+	if err := Trust(path); err != nil {
+		t.Fatal(err)
+	}
+	// A permission denial is not the only way the listing fails, and the others
+	// are not hypothetical: os.Stat needs no descriptor, so verifyTrustStore
+	// sails through an exhausted descriptor table while the ReadDir right after
+	// it fails with EMFILE. EIO and a stale NFS handle land the same way. None
+	// of them can be arranged from a test on demand, hence listTrustStore.
+	failure := &fs.PathError{Op: "open", Path: trustDir(), Err: syscall.EMFILE}
+	listTrustStore = func(string) ([]os.DirEntry, error) { return nil, failure }
+	t.Cleanup(func() { listTrustStore = os.ReadDir })
+
+	err := Untrust(path)
+	if err == nil {
+		t.Fatal("expected error when the trust store listing fails")
+	}
+	if strings.HasPrefix(err.Error(), "not trusted:") {
+		t.Fatalf("listing failure reported as not trusted: %v", err)
+	}
+	if !errors.Is(err, syscall.EMFILE) {
+		t.Errorf("got %v, want the listing failure itself", err)
+	}
+}
+
+func TestUntrustReportsUnreadableRecord(t *testing.T) {
+	skipIfRoot(t)
+	path := trustSetup(t)
+	if err := Trust(path); err != nil {
+		t.Fatal(err)
+	}
+	// Here the store lists fine and only the record cannot be read. Skipping it
+	// leaves the grant in force while the loop finds no match and reports "not
+	// trusted": the same lie as an unlistable store, one level down, and this
+	// one also makes the config impossible to revoke.
+	entries, err := os.ReadDir(trustDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d records after Trust, want 1", len(entries))
+	}
+	record := filepath.Join(trustDir(), entries[0].Name())
+	if err := os.Chmod(record, 0o000); err != nil {
+		t.Fatal(err)
+	}
+
+	err = Untrust(path)
+	if err == nil {
+		t.Fatal("expected error when a record cannot be read")
+	}
+	if strings.HasPrefix(err.Error(), "not trusted:") {
+		t.Fatalf("unreadable record reported as not trusted: %v", err)
+	}
+	if !strings.Contains(err.Error(), record) {
+		t.Errorf("got %v, want the underlying failure naming %s", err, record)
+	}
+	// Stat needs no read permission, so the grant is demonstrably still there:
+	// this is exactly the trust that a "not trusted" answer would have denied.
+	if !IsTrusted(path) {
+		t.Error("grant vanished; the unreadable record no longer proves the point")
+	}
+}
+
+func TestUntrustSkipsDirectoriesInStore(t *testing.T) {
+	path := trustSetup(t)
+	if err := Trust(path); err != nil {
+		t.Fatal(err)
+	}
+	// Nothing sallyport writes puts a directory in the store, but reading one
+	// fails with EISDIR, and the unreadable-record branch refuses to ignore a
+	// failed read. Without the directory being stepped over, one stray directory
+	// would make every untrust impossible.
+	if err := os.Mkdir(filepath.Join(trustDir(), "stray"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Untrust(path); err != nil {
+		t.Fatalf("untrust failed with a stray directory in the store: %v", err)
+	}
+	if IsTrusted(path) {
+		t.Error("config still trusted after Untrust")
 	}
 }
 

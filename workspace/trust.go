@@ -321,6 +321,14 @@ func Trust(path string) error {
 	return nil
 }
 
+// listTrustStore lists the trust store's records. It is a variable purely so
+// tests can reproduce listing failures the filesystem cannot be made to produce
+// on demand — a saturated descriptor table, EIO, a stale NFS handle. Those all
+// have to be surfaced rather than answered with "not trusted", and a test that
+// can only manufacture EACCES cannot pin that down. Production always uses
+// os.ReadDir.
+var listTrustStore = os.ReadDir
+
 // Untrust matches records by their recorded config identity, not by a
 // fingerprint of the current content. A grant is keyed by sha256(identity +
 // content), so once the config is edited the current fingerprint no longer names
@@ -338,9 +346,18 @@ func Untrust(path string) error {
 	if err != nil {
 		return err
 	}
-	entries, err := os.ReadDir(trustDir())
-	if err != nil {
+	entries, err := listTrustStore(trustDir())
+	if os.IsNotExist(err) {
+		// No store at all means no grant was ever recorded: this is the ordinary
+		// "you never trusted this" case, the same answer as an empty match below.
 		return fmt.Errorf("not trusted: %s", path)
+	}
+	if err != nil {
+		// A permission or I/O error is not proof the grant is absent; a store the
+		// user cannot list may still hold a live grant. Reporting "not trusted"
+		// would send the user looking for the wrong problem, so surface the cause
+		// as Prune does.
+		return err
 	}
 	removed := 0
 	for _, e := range entries {
@@ -349,10 +366,27 @@ func Untrust(path string) error {
 		if strings.HasSuffix(e.Name(), ".tmp") {
 			continue
 		}
+		// A grant is a file sallyport writes; a directory is somebody else's
+		// doing and can never be one, so stepping over it cannot leave a live
+		// grant behind. Reading it would fail with EISDIR, which the branch
+		// below rightly refuses to ignore, and one stray directory would then
+		// make every untrust impossible.
+		if e.IsDir() {
+			continue
+		}
 		record := filepath.Join(trustDir(), e.Name())
 		data, err := os.ReadFile(record)
-		if err != nil {
+		if os.IsNotExist(err) {
+			// A concurrent untrust or prune won the race: the record is gone,
+			// so it holds no grant to revoke.
 			continue
+		}
+		if err != nil {
+			// The same reasoning as the listing above, one level down. A record
+			// that cannot be read may be the very grant being revoked, so
+			// skipping it would leave trust in force while the command reports
+			// "not trusted" and exits as if there were nothing to do.
+			return err
 		}
 		if strings.TrimSpace(string(data)) != target {
 			continue
@@ -380,7 +414,7 @@ func Prune() error {
 	if err := verifyTrustStore(); err != nil {
 		return fmt.Errorf("refusing to prune: %w", err)
 	}
-	entries, err := os.ReadDir(trustDir())
+	entries, err := listTrustStore(trustDir())
 	if os.IsNotExist(err) {
 		Info("nothing to prune")
 		return nil
