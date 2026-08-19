@@ -149,20 +149,24 @@ func verifyTrustStore() error {
 // link nor its destination can be repointed or rewritten by an untrusted user.
 // Config-side ownership allows the user or root (see trustedOwner).
 //
-// The guarantee stops at that immediate parent: no higher ancestor is examined.
-// A world-writable non-sticky directory further up could in principle be
-// rename-swapped whole, putting a different tree under the same path — the same
-// attack checkConfigNode blocks one level down. Walking to the filesystem root
-// is deliberately not done: it would reject legitimate layouts whose upper
-// directories are group-writable by policy (shared project or home trees). What
-// bounds the remainder is the fingerprint, not a deeper walk: a grant is
-// sha256(identity + content), the identity is derived from the path, and
-// LoadTrustedConfig re-hashes the bytes it is about to apply. A tree swapped in
-// under the same path either keeps that identity and changes the content, or
-// changes the identity itself; either way no grant matches and the apply path
-// returns ErrUntrusted. So an unchecked ancestor only widens the window this
-// function is already scoped to — between a human reading the config and Trust
-// hashing it — and buys nothing once a grant exists.
+// The guarantee stops at that immediate parent: no higher ancestor is examined,
+// so nothing checks who may replace the parent itself. A writable non-sticky
+// directory anywhere above lets any user rename the entries inside it, which
+// swaps the whole subtree holding the config — the checked parent included —
+// for one the attacker controls. The fingerprint bounds only what happens to
+// the config bytes after that: a grant is sha256(identity + content), the
+// identity is derived from the path, and LoadTrustedConfig re-hashes the bytes
+// it is about to apply without re-running any of the checks here. A symlink
+// left at the swapped path resolves the identity elsewhere and so misses the
+// grant, but a renamed directory keeps the path, and an attacker who copies the
+// approved config byte for byte keeps the content too: the grant still matches
+// and the config still applies, over a tree that is now theirs, at any time
+// after approval. For a config of literal values that leaves the applied env
+// exactly as approved; for one whose values dereference the workspace
+// ("$WORKSPACE_PATH/bin" on PATH) it hands the attacker's tree to the shell.
+// The risk is accepted rather than closed: walking to the filesystem root would
+// reject legitimate shared project and home trees, whose upper directories are
+// group-writable by policy.
 func verifyConfigPath(path string) error {
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -254,8 +258,9 @@ func fingerprintBytes(abs string, content []byte) string {
 // nothing should: asking here and applying afterwards reads the file twice and
 // reopens exactly the window LoadTrustedConfig exists to close, so every caller
 // that intends to act on the config goes through LoadTrustedConfig instead. It
-// remains as a probe for the tests, which need to assert grant state after
-// Trust/Untrust/Prune without applying anything.
+// stays for callers that only want to inspect grant state without applying it;
+// inside this repository those are the tests, which assert what Trust, Untrust
+// and Prune left behind.
 func IsTrusted(path string) bool {
 	// An insecure store means any grant it holds may be forged; trust nothing.
 	if verifyTrustStore() != nil {
