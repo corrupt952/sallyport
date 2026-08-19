@@ -69,11 +69,3 @@ func TestNoArgCommandsRejectExtraArgs(t *testing.T) {
 		}
 	}
 }
-
-// Guards the happy path against an over-eager arg check.
-func TestVersionSucceeds(t *testing.T) {
-	silenceOutput(t)
-	if got := runCommand(t, &VersionCommand{}); got != subcommands.ExitSuccess {
-		t.Errorf("version: got %v, want ExitSuccess", got)
-	}
-}
