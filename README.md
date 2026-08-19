@@ -135,7 +135,9 @@ Strict mode applies a value exactly as written: `$HOME` stays `$HOME`, `$(...)` 
 
 Values are evaluated by zsh as you enter the workspace, exactly as if the `export` line sat in your `.zshrc`: `$(op read ...)` runs on entry (not on every `cd` below the root), and a literal `"` in a value has to be escaped as `\"`.
 
-Do not reference one `env` entry from another. The automatic `WORKSPACE_PATH` is exported first and the remaining keys in alphabetical order, so `"BIN": "$TOOLS/bin"` expands `$TOOLS` before `TOOLS` has been set and silently picks up whatever the surrounding shell held — no error, just a wrong value. Referring to `$WORKSPACE_PATH` or to variables that already exist outside the workspace is fine.
+In expand mode a value can reference another `env` entry, but only in one direction: the automatic `WORKSPACE_PATH` is exported first and the remaining keys in byte order (`BINX` before `BIN_DIR`, lowercase keys last), so the reference resolves only when the referencing key sorts later. Written the other way round, as in `"BIN": "$TOOLS/bin"`, `$TOOLS` expands to whatever the variable held before the workspace was entered — usually a wrong value and no error, though under `setopt nounset` the eval aborts partway instead, and because the state line is written last nothing is recorded and the error returns on every prompt. `$WORKSPACE_PATH` is exempt only while it stays automatic; set it in `env` yourself and it becomes an ordinary key in that same order.
+
+A value that folds in a variable from outside the workspace, like the `PATH` entry above, is applied again by every shell you start inside the workspace: a child shell inherits no state and takes the environment it was born into as its baseline, so the prefix repeats once per nesting level.
 
 ## Development
 
