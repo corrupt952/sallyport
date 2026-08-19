@@ -135,6 +135,8 @@ Strict mode applies a value exactly as written: `$HOME` stays `$HOME`, `$(...)` 
 
 Values are evaluated by zsh as you enter the workspace, exactly as if the `export` line sat in your `.zshrc`: `$(op read ...)` runs on entry (not on every `cd` below the root), and a literal `"` in a value has to be escaped as `\"`.
 
+Do not reference one `env` entry from another. The automatic `WORKSPACE_PATH` is exported first and the remaining keys in alphabetical order, so `"BIN": "$TOOLS/bin"` expands `$TOOLS` before `TOOLS` has been set and silently picks up whatever the surrounding shell held — no error, just a wrong value. Referring to `$WORKSPACE_PATH` or to variables that already exist outside the workspace is fine.
+
 ## Development
 
 ```sh
