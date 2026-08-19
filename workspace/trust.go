@@ -339,8 +339,17 @@ func Untrust(path string) error {
 		return err
 	}
 	entries, err := os.ReadDir(trustDir())
-	if err != nil {
+	if os.IsNotExist(err) {
+		// No store at all means no grant was ever recorded: this is the ordinary
+		// "you never trusted this" case, the same answer as an empty match below.
 		return fmt.Errorf("not trusted: %s", path)
+	}
+	if err != nil {
+		// A permission or I/O error is not proof the grant is absent; a store the
+		// user cannot list may still hold a live grant. Reporting "not trusted"
+		// would send the user looking for the wrong problem, so surface the cause
+		// as Prune does.
+		return err
 	}
 	removed := 0
 	for _, e := range entries {

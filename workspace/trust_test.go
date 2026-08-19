@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -58,8 +59,45 @@ func TestTrustRejectsBrokenConfig(t *testing.T) {
 
 func TestUntrustWithoutGrant(t *testing.T) {
 	path := trustSetup(t)
-	if err := Untrust(path); err == nil {
+	// Nothing has been trusted yet, so the store does not even exist. A missing
+	// store holds no grants, which is the ordinary "never trusted" answer and
+	// must read as such rather than as a failure to look.
+	err := Untrust(path)
+	if err == nil {
 		t.Fatal("expected error when untrusting an unapproved config")
+	}
+	if !strings.HasPrefix(err.Error(), "not trusted:") {
+		t.Fatalf("missing store: got %v, want a not-trusted error", err)
+	}
+}
+
+func TestUntrustReportsUnlistableStore(t *testing.T) {
+	skipIfRoot(t)
+	path := trustSetup(t)
+	if err := Trust(path); err != nil {
+		t.Fatal(err)
+	}
+	// A store the user cannot read still passes verifyTrustStore: it is owned by
+	// the user and writable by nobody else, which is all that check demands. The
+	// failure therefore only surfaces when the records are listed, and the grant
+	// is still on disk at that point, so answering "not trusted" would deny a
+	// trust that exists and point the user at the wrong problem.
+	store := trustDir()
+	if err := os.Chmod(store, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	// Restore before t.TempDir's cleanup, which cannot remove an unreadable dir.
+	t.Cleanup(func() { _ = os.Chmod(store, 0o700) })
+
+	err := Untrust(path)
+	if err == nil {
+		t.Fatal("expected error when the trust store cannot be listed")
+	}
+	if strings.HasPrefix(err.Error(), "not trusted:") {
+		t.Fatalf("unreadable store reported as not trusted: %v", err)
+	}
+	if !errors.Is(err, os.ErrPermission) {
+		t.Errorf("got %v, want the underlying permission error", err)
 	}
 }
 
