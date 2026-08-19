@@ -2,16 +2,22 @@ package workspace
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 )
 
-// strconv.Quote's escaping of " and \ is a valid subset of JSON for the ASCII
-// values these tests use.
-func quoteJSON(s string) string { return strconv.Quote(s) }
+// quoteJSON emits a JSON string literal. It has to be a real JSON encoder:
+// strconv.Quote's escape alphabet is not JSON's (\x00 has no JSON spelling), so
+// a test payload carrying a control character would fail on syntax instead of
+// on what it means to test.
+func quoteJSON(s string) string {
+	// Marshaling a string cannot fail.
+	b, _ := json.Marshal(s)
+	return string(b)
+}
 
 func writeConfig(t *testing.T, dir, content string) {
 	t.Helper()
@@ -45,9 +51,17 @@ func TestLoadConfigAcceptsCommentsAndTrailingCommas(t *testing.T) {
 func TestLoadConfigRejectsInvalidEnvKey(t *testing.T) {
 	for _, key := range []string{"; rm -rf ~ #", "FOO BAR", "$(whoami)", "A-B"} {
 		dir := t.TempDir()
-		writeConfig(t, dir, `{"env": {"`+key+`": "x"}}`)
-		if _, err := LoadConfig(ConfigPath(dir)); err == nil {
+		// The key goes through quoteJSON: pasted raw, a key containing a quote or
+		// a newline would break the JSON itself and the test would pass on a
+		// syntax error instead of on key validation.
+		writeConfig(t, dir, `{"env": {`+quoteJSON(key)+`: "x"}}`)
+		_, err := LoadConfig(ConfigPath(dir))
+		if err == nil {
 			t.Errorf("env key %q accepted, want error", key)
+			continue
+		}
+		if !strings.Contains(err.Error(), "invalid env key") {
+			t.Errorf("env key %q rejected for the wrong reason: %v", key, err)
 		}
 	}
 }
@@ -150,17 +164,71 @@ func TestLoadConfigAcceptsFileAtSizeLimit(t *testing.T) {
 	}
 }
 
+// TestReadConfigFileEnforcesSizeLimit pins where and how the limit is applied,
+// not just its value: Trust and LoadTrustedConfig call readConfigFile directly,
+// symlinked configs are a supported deployment shape, and the limit exists to
+// bound the per-prompt cost, which only holds if the file is never read.
+func TestReadConfigFileEnforcesSizeLimit(t *testing.T) {
+	dir := t.TempDir()
+	writeConfigOfSize(t, dir, wantMaxConfigSize+1)
+	path := ConfigPath(dir)
+
+	wantRefusal := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("oversized config accepted, want error")
+		}
+		if !strings.Contains(err.Error(), "exceeds") {
+			t.Errorf("error = %v, want the size limit to be the reason", err)
+		}
+	}
+
+	t.Run("on the readConfigFile path", func(t *testing.T) {
+		_, err := readConfigFile(path)
+		wantRefusal(t, err)
+	})
+
+	t.Run("through a symlink", func(t *testing.T) {
+		link := filepath.Join(t.TempDir(), ConfigFileName)
+		if err := os.Symlink(path, link); err != nil {
+			t.Fatal(err)
+		}
+		_, err := readConfigFile(link)
+		wantRefusal(t, err)
+	})
+
+	t.Run("without reading the file", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("running as root: file permissions are not enforced")
+		}
+		if err := os.Chmod(path, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if err := os.Chmod(path, 0o644); err != nil {
+				t.Error(err)
+			}
+		})
+		// Reading first would surface a permission error instead.
+		_, err := readConfigFile(path)
+		wantRefusal(t, err)
+	})
+}
+
 func TestParseConfigLeavesInputUnmodified(t *testing.T) {
 	// hujson.Standardize rewrites its input buffer in place. Callers fingerprint
 	// the very bytes they hand to parseConfig, so a parse that mutated them would
-	// make the recorded fingerprint depend on parse order.
-	src := []byte("{\n  // comment\n  \"env\": {\"FOO\": \"bar\"}, // trailing\n}\n")
-	want := append([]byte(nil), src...)
-	if _, err := parseConfig("cfg.jsonc", src); err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(src, want) {
-		t.Errorf("parseConfig modified its input:\n got %q\nwant %q", src, want)
+	// make the recorded fingerprint depend on parse order. Sizes vary because a
+	// copy taken only for small inputs would still corrupt real configs.
+	for _, pad := range []int{0, 8000} {
+		src := []byte("{\n  // comment\n  \"env\": {\"FOO\": \"" + strings.Repeat("x", pad) + "\"}, // trailing\n}\n")
+		want := append([]byte(nil), src...)
+		if _, err := parseConfig("cfg.jsonc", src); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(src, want) {
+			t.Errorf("parseConfig modified its %d-byte input", len(want))
+		}
 	}
 }
 
