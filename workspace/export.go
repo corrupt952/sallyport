@@ -315,6 +315,14 @@ func decodeState(raw string) (state, bool, error) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return state{}, false, err
 	}
+	// Saved keys are emitted bare into `export KEY=` and `unset KEY`, and keyRe
+	// only guards the way in (parseConfig). A blob carrying a key sallyport could
+	// never have written is not state to restore from, whatever its schema.
+	for k := range s.Saved {
+		if !keyRe.MatchString(k) {
+			return state{}, false, fmt.Errorf("invalid saved key %q", k)
+		}
+	}
 	return s, s.Schema != stateSchema, nil
 }
 

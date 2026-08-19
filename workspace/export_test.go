@@ -2,7 +2,9 @@ package workspace
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -596,12 +598,35 @@ func TestZshHookStateReferenceIsNounsetSafe(t *testing.T) {
 	}
 }
 
-// Masking SIGINT must be confined with localtraps so a user-defined INT trap is
-// restored on return; `trap - SIGINT` would reset it to the default.
+// exportMasksInterrupt reports whether the shim sets INT to the ignore handler,
+// however it spells the empty handler and the signal name: what matters is that
+// a mask is installed, not which of zsh's accepted forms it takes.
+func exportMasksInterrupt(script string) bool {
+	for _, line := range strings.Split(script, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "trap ") || !strings.HasSuffix(line, "INT") {
+			continue
+		}
+		if strings.Contains(line, `''`) || strings.Contains(line, `""`) {
+			return true
+		}
+	}
+	return false
+}
+
+// The property is the pair: the hook masks INT for its own duration, and the
+// user's trap is what INT means again afterwards. A missing mask makes the
+// preservation vacuous, escaping the mask leaks it past the return, and
+// `trap - SIGINT` would drop the user's trap to the default. Kept cheap so it
+// still runs where zsh is unavailable;
+// TestZshHookRealZshMasksInterruptAndSucceeds is the behavioural judge.
 func TestZshHookPreservesUserIntTrap(t *testing.T) {
 	script, err := ZshHook()
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !exportMasksInterrupt(script) {
+		t.Errorf("shim never masks INT, so there is no trap to preserve:\n%s", script)
 	}
 	if !strings.Contains(script, "localtraps") {
 		t.Errorf("shim does not confine trap changes with localtraps:\n%s", script)
@@ -1272,5 +1297,256 @@ func TestZshQuote(t *testing.T) {
 		if got := zshQuote(in); got != want {
 			t.Errorf("zshQuote(%q) = %s, want %s", in, got, want)
 		}
+	}
+}
+
+// exportForgedSavedKeys are saved keys no sallyport ever wrote: parseConfig's
+// keyRe rejects them on the way in, so a state carrying one was forged. They
+// land unquoted in `export KEY=` and `unset KEY`, which the shell evals, so
+// each turns a restore into a command of the forger's choosing.
+var exportForgedSavedKeys = []struct {
+	name string
+	key  string
+}{
+	{"command separator", "A; touch OOPS; echo"},
+	{"command substitution", "A=$(touch OOPS); B"},
+	{"newline", "A\ntouch OOPS\nB"},
+	{"leading digit", "9A"},
+	{"dash", "A-B"},
+}
+
+// A forged state must be discarded like a corrupt one: the restore keys are the
+// only place a key reaches the shell without keyRe having seen it. Both branches
+// are covered, because guarding one leaves the other live: a non-nil original
+// renders `export KEY=`, a nil one `unset KEY`.
+func TestExportDiscardsStateWithForgedSavedKeys(t *testing.T) {
+	for _, tc := range exportForgedSavedKeys {
+		for _, branch := range []string{"export", "unset"} {
+			t.Run(tc.name+"/"+branch, func(t *testing.T) {
+				var orig *string
+				if branch == "export" {
+					v := "x"
+					orig = &v
+				}
+				setState(t, state{Root: "/somewhere/demo", Saved: map[string]*string{tc.key: orig}})
+
+				res, err := BuildExportScript(t.TempDir(), false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !hasWarning(res.Warnings, "is corrupted") {
+					t.Errorf("forged state accepted without the corrupt-state warning: %v", res.Warnings)
+				}
+				for _, line := range strings.Split(res.Script, "\n") {
+					if !strings.HasPrefix(line, "export ") && !strings.HasPrefix(line, "unset ") {
+						continue
+					}
+					if strings.Contains(line, "OOPS") || strings.Contains(line, tc.key) {
+						t.Errorf("forged key rendered into the script: %q\n%s", line, res.Script)
+					}
+				}
+			})
+		}
+	}
+}
+
+// The real judge for the forged-key rejection: let zsh eval the script the hook
+// would have eval'd and see whether the key ran as a command.
+func TestExportForgedStateKeyDoesNotRunInZsh(t *testing.T) {
+	zsh, err := exec.LookPath("zsh")
+	if err != nil {
+		t.Skip("zsh not available")
+	}
+	dir := t.TempDir()
+	setState(t, state{
+		Root:  "/somewhere/demo",
+		Saved: map[string]*string{"A; touch " + filepath.Join(dir, "OOPS") + "; echo": nil},
+	})
+	script := mustBuild(t, t.TempDir(), false)
+
+	out := exportRunZsh(t, zsh, dir, script+"\nprint EVALED\n")
+	if !strings.Contains(out, "EVALED") {
+		t.Fatalf("the script did not eval at all:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "OOPS")); err == nil {
+		t.Errorf("the forged saved key was executed as a command:\n%s", script)
+	}
+}
+
+// Entering a workspace from a subdirectory must apply the workspace's own
+// variables: WORKSPACE_PATH is what prompt integrations read, and building it
+// from the cwd instead makes it drift with every cd below the root.
+func TestExportFromSubdirectoryAppliesRootNotCwd(t *testing.T) {
+	t.Setenv(stateEnvKey, "")
+	root := newWorkspaceDir(t, `{"env": {"OP_ACCOUNT": "acct.example.com"}}`)
+	sub := filepath.Join(root, "deep", "nested")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	script := mustBuild(t, sub, false)
+	if !strings.Contains(script, "export WORKSPACE_PATH='"+root+"'") {
+		t.Errorf("WORKSPACE_PATH is not the workspace root when entering from %s:\n%s", sub, script)
+	}
+	if st := stateFromScript(t, script); st.Root != root {
+		t.Errorf("state root = %q, want the workspace root %q", st.Root, root)
+	}
+}
+
+// exportPlantStandin writes an executable stand-in for the sallyport binary and
+// returns its path. The shim is rendered for the stand-in rather than having a
+// path patched into ZshHook's output: a substitution that matches nothing
+// leaves the shim invoking the test binary, which re-runs the whole suite.
+func exportPlantStandin(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "sallyport")
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// exportRunZsh runs script under zsh in dir. A shim or a script that opens a
+// quote or a command substitution it never closes leaves zsh waiting; WaitDelay
+// caps the wait on the output pipe afterwards, so a regression reports instead
+// of hanging the test binary.
+func exportRunZsh(t *testing.T, zsh, dir, script string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, zsh, "-c", script)
+	cmd.Dir = dir
+	cmd.WaitDelay = 5 * time.Second
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("zsh never finished:\n%s", out)
+	}
+	if err != nil {
+		t.Fatalf("zsh run failed: %v\n%s", err, out)
+	}
+	return string(out)
+}
+
+// The shim must invoke the binary with an argument vector the export subcommand
+// accepts, from both entry points. The real binary answers anything else with
+// its usage on stderr and an empty stdout, which the hook evals to nothing: a
+// sallyport that has silently stopped working. The stand-in enforces the same
+// contract, so what is asserted is that outcome rather than a literal argument
+// list.
+func TestZshHookRealZshInvokesBinaryWithAcceptedArgs(t *testing.T) {
+	zsh, err := exec.LookPath("zsh")
+	if err != nil {
+		t.Skip("zsh not available")
+	}
+	standin := exportPlantStandin(t, `#!/bin/sh
+for a in "$@"; do last="$a"; done
+if [ "$1" != export ] || [ "$last" != zsh ]; then
+  echo "usage: export [-quiet] zsh" >&2
+  exit 2
+fi
+printf "export SALLYPORT_ARGS='%s'\n" "$*"
+`)
+	out := exportRunZsh(t, zsh, filepath.Dir(standin), zshHookFor(standin)+`
+_sallyport_hook
+printf 'CHPWD=%s\n' "${SALLYPORT_ARGS-<nothing evaled>}"
+unset SALLYPORT_ARGS
+_sallyport_hook_precmd
+printf 'PRECMD=%s\n' "${SALLYPORT_ARGS-<nothing evaled>}"
+`)
+	// The per-prompt entry point has to reach the binary as the quiet variant, or
+	// every empty Enter repeats the warnings.
+	for _, want := range []string{"CHPWD=export zsh", "PRECMD=export -quiet zsh"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("shim output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// Registration is the whole shim: chpwd for directory changes, and precmd so
+// trust, untrust and config edits take effect on the next prompt without a cd.
+// It goes in front of hooks already registered, so a workspace's values are in
+// place before anything else in the array reads the environment, and it must
+// survive .zshrc being sourced twice without stacking a second copy that runs
+// the binary again on every prompt.
+func TestZshHookRealZshRegistersOnceInFront(t *testing.T) {
+	zsh, err := exec.LookPath("zsh")
+	if err != nil {
+		t.Skip("zsh not available")
+	}
+	shim := zshHookFor(filepath.Join(t.TempDir(), "sallyport"))
+	out := exportRunZsh(t, zsh, t.TempDir(), `
+typeset -ag chpwd_functions precmd_functions
+chpwd_functions=(user_chpwd)
+precmd_functions=(user_precmd)
+`+shim+shim+`
+printf 'CHPWD=%s\n' "${(j: :)chpwd_functions}"
+printf 'PRECMD=%s\n' "${(j: :)precmd_functions}"
+`)
+	for _, want := range []string{
+		"CHPWD=_sallyport_hook user_chpwd",
+		"PRECMD=_sallyport_hook_precmd user_precmd",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("shim registration is wrong, missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// A Ctrl-C landing mid-hook must neither cut the eval short — which would leave
+// the environment applied and the state global unwritten — nor reach a
+// user-defined INT trap, and that trap must be back once the hook returns. The
+// stand-in signals the shell while the hook waits on its output, then ends on a
+// failing command: the hook still must not propagate a status, since zsh stops
+// running the remaining chpwd hooks when one fails.
+func TestZshHookRealZshMasksInterruptAndSucceeds(t *testing.T) {
+	zsh, err := exec.LookPath("zsh")
+	if err != nil {
+		t.Skip("zsh not available")
+	}
+	standin := exportPlantStandin(t, `#!/bin/sh
+kill -INT "$SALLYPORT_TEST_ZSH_PID"
+sleep 1
+printf 'export SALLYPORT_PROBE=ok\n'
+printf 'false\n'
+`)
+	out := exportRunZsh(t, zsh, filepath.Dir(standin), `
+export SALLYPORT_TEST_ZSH_PID=$$
+`+zshHookFor(standin)+`
+trap 'INTFIRED=yes' INT
+_sallyport_hook
+printf 'STATUS=%s\n' "$?"
+printf 'PROBE=%s\n' "${SALLYPORT_PROBE-<unset>}"
+printf 'INTFIRED=%s\n' "${INTFIRED-no}"
+# zsh's bare `+"`trap`"+` lists set traps as `+"`trap -- 'cmd' SIG`"+`, with the
+# body re-rendered from the parsed code; call it directly, not in $(...), which
+# runs in a subshell that resets traps.
+trap
+`)
+	if !strings.Contains(out, "INTFIRED=no") {
+		t.Errorf("SIGINT was not masked, so a Ctrl-C runs the user's trap mid-eval:\n%s", out)
+	}
+	if !strings.Contains(out, "PROBE=ok") {
+		t.Errorf("SIGINT cut the eval short, leaving the transition half-applied:\n%s", out)
+	}
+	if !strings.Contains(out, "STATUS=0") {
+		t.Errorf("hook propagated a failure; zsh would stop the remaining chpwd hooks:\n%s", out)
+	}
+	if !strings.Contains(out, "trap -- 'INTFIRED=yes") {
+		t.Errorf("the mask outlived the hook instead of being confined to it:\n%s", out)
+	}
+}
+
+// The schema stamp exists to catch state written by a binary with a different
+// wire layout, so it has to be derived from that layout and long enough that
+// two layouts do not stamp the same value: a collision is exactly the silent
+// misread the stamp is there to prevent.
+func TestStateSchemaDerivedFromLayout(t *testing.T) {
+	sum := sha256.Sum256([]byte(stateSchemaString()))
+	if full := hex.EncodeToString(sum[:]); !strings.HasPrefix(full, stateSchema) {
+		t.Errorf("stateSchema %q does not hash the layout %q (whose digest is %s)", stateSchema, stateSchemaString(), full)
+	}
+	const minLen = 12
+	if len(stateSchema) < minLen {
+		t.Errorf("stateSchema is %d hex digits, want at least %d: %q", len(stateSchema), minLen, stateSchema)
 	}
 }
