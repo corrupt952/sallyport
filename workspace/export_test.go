@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newWorkspaceDir(t *testing.T, config string) string {
@@ -612,6 +614,114 @@ print "nounset-ok"
 	// The hook must complete under nounset with an empty state global.
 	if !strings.Contains(got, "nounset-ok") {
 		t.Errorf("hook aborted under nounset:\n%s", got)
+	}
+}
+
+// hostileBinaryPaths are directory names an installed sallyport can plausibly
+// sit under, each carrying a character the shell would act on if the shim did
+// not quote the path: $ and ` expand, " ends a double-quoted string, and an
+// apostrophe ends a single-quoted one (/Users/o'brien/bin, "Bob's Tools"). ! is
+// history expansion, ; and & are command separators, and a space merely has to
+// survive. Each broke, or could break, a different quoting mistake, so they are
+// exercised together rather than picked one at a time.
+var hostileBinaryPaths = []string{
+	`a$b`,
+	"c`d",
+	`e f`,
+	`p'q`,
+	`r"s`,
+	`t;touch OOPS;u`,
+	`v!w&x`,
+	"a$b`c d'e\"f;g",
+}
+
+// Regression guard, kept cheap so it still runs where zsh is unavailable: for a
+// path whose characters need escaping under any quoting scheme, the shim must
+// not carry the path verbatim. It deliberately does not compare against
+// zshQuote's output — that only asks whether the bytes match the helper the
+// implementation happens to use, and passes just as happily for a wrapper that
+// puts bare single quotes around the path, which dies on the first apostrophe.
+// Requiring the path to have been altered catches both that and no quoting at
+// all, while leaving a differently-but-correctly quoting implementation free.
+// TestZshHookRealZshRunsBinaryAtHostilePath is what actually judges
+// correctness.
+func TestZshHookQuotesBinaryPath(t *testing.T) {
+	// Contains both an apostrophe and a $, so every quoting scheme has to
+	// escape something: single-quoting must break up the apostrophe, and
+	// double-quoting must escape the $.
+	const self = `/opt/o'brien/a$b/sallyport`
+	script := zshHookFor(self)
+	if strings.Contains(script, self) {
+		t.Errorf("shim carries the binary path verbatim, so the shell rewrites it:\n%s", script)
+	}
+}
+
+// The real judge: for every hostile path, plant a stand-in binary there, render
+// the shim for that exact path, and let zsh run the hook. The assertion is
+// purely behavioural — did zsh manage to exec the file — so any correct
+// quoting scheme passes and any broken one fails, regardless of shape.
+//
+// The stand-in is reached through the shim's own `eval "$( ... )"`, so this
+// exercises the real nested quoting context rather than a hand-written
+// approximation. Rendering with zshHookFor is also what keeps the failure mode
+// contained: an earlier version patched the path into ZshHook's output with
+// strings.Replace, and when that silently matched nothing the shim invoked the
+// test binary itself, which re-ran the whole suite — hundreds of nested
+// processes outliving `go test`, all reported as a quoting error.
+func TestZshHookRealZshRunsBinaryAtHostilePath(t *testing.T) {
+	zsh, err := exec.LookPath("zsh")
+	if err != nil {
+		t.Skip("zsh not available")
+	}
+
+	for _, name := range hostileBinaryPaths {
+		t.Run(name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), name)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			// The stand-in only has to be executable and print something the
+			// hook can eval; whether zsh resolves the path is the whole test.
+			fake := filepath.Join(dir, "sallyport")
+			if err := os.WriteFile(fake, []byte("#!/bin/sh\nprintf 'export SALLYPORT_PROBE=ok\\n'\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			// Bounded: a broken quoting can leave zsh waiting on a command
+			// substitution the path opened, and WaitDelay caps the wait on the
+			// output pipe afterwards, so a regression reports instead of
+			// hanging the test binary.
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, zsh, "-c", zshHookFor(fake)+`
+# ${+functions[...]} is 0 when the shim failed to parse: a mangled path can
+# break the enclosing function definition, not just the exec.
+printf 'HOOKDEF=%s\n' "${+functions[_sallyport_hook]}"
+_sallyport_hook
+printf 'PROBE=%s\n' "${SALLYPORT_PROBE-<unset>}"
+`)
+			cmd.Dir = dir
+			cmd.WaitDelay = 5 * time.Second
+			out, err := cmd.CombinedOutput()
+			if ctx.Err() != nil {
+				t.Fatalf("zsh never finished for a binary at %q:\n%s", dir, out)
+			}
+			if err != nil {
+				t.Fatalf("zsh run failed: %v\n%s", err, out)
+			}
+			got := string(out)
+			if !strings.Contains(got, "HOOKDEF=1") {
+				t.Errorf("shim for a binary at %q did not even define the hook:\n%s", dir, got)
+			}
+			if !strings.Contains(got, "PROBE=ok") {
+				t.Errorf("hook did not run the binary at %q:\n%s", dir, got)
+			}
+			// A path is data, never something the shell gets to execute: the
+			// `;touch OOPS;` case would leave this file behind if it were.
+			if _, err := os.Stat(filepath.Join(dir, "OOPS")); err == nil {
+				t.Errorf("the binary path was executed as a command for %q", dir)
+			}
+		})
 	}
 }
 
