@@ -71,16 +71,6 @@ type state struct {
 // reason direnv hooks both). The precmd variant passes -quiet: repeating the
 // "not trusted" warning on every empty Enter would drown the prompt.
 //
-// The path to the binary is single-quoted with zshQuote rather than
-// interpolated between double quotes. Double quotes still expand $ and `, so a
-// binary installed under a path containing either would be mangled at every
-// hook invocation: `$b` in .../a$b/sallyport expands to nothing and the exec
-// fails silently (the hook swallows it and returns 0), and a backtick opens a
-// command substitution that breaks the shim's own parse, leaving
-// _sallyport_hook undefined. Single quotes are safe here even though the
-// eval's `$(...)` sits inside double quotes: a command substitution starts a
-// fresh quoting context, which is also why the "${...-}" above works.
-//
 // The shim only registers and never applies immediately: applying while
 // .zshrc is still being sourced lets later export lines clobber workspace
 // values (frozen in by the fast path), and records pre-.zshrc values as the
@@ -91,6 +81,27 @@ func ZshHook() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return zshHookFor(self), nil
+}
+
+// zshHookFor renders the shim for a given binary path. It is split out from
+// ZshHook for one reason: os.Executable() cannot be substituted, and under
+// `go test` it is always a tame path like /tmp/.../workspace.test, so a test
+// driving ZshHook alone can never exercise the quoting for the characters that
+// actually break it. Tests call this with hostile paths instead.
+//
+// The path is single-quoted with zshQuote rather than interpolated between
+// double quotes. Double quotes still expand $ and `, so a binary installed
+// under a path containing either would be mangled at every hook invocation:
+// `$b` in .../a$b/sallyport expands to nothing and the exec fails silently
+// (the hook swallows it and returns 0), and a backtick opens a command
+// substitution that breaks the shim's own parse, leaving _sallyport_hook
+// undefined. An apostrophe is just as fatal, which is why the quoting must go
+// through zshQuote — wrapping in bare single quotes would end the quote early
+// on a path like /Users/o'brien/bin. Single quotes are safe here even though
+// the eval's `$(...)` sits inside double quotes: a command substitution starts
+// a fresh quoting context, which is also why the "${...-}" below works.
+func zshHookFor(self string) string {
 	return fmt.Sprintf(`typeset -g %[1]s
 _sallyport_hook() {
   # localoptions/localtraps confine both the SIGINT mask and any option change
@@ -116,7 +127,7 @@ fi
 if (( ! ${precmd_functions[(I)_sallyport_hook_precmd]} )); then
   precmd_functions=(_sallyport_hook_precmd $precmd_functions)
 fi
-`, stateShellVar, stateEnvKey, zshQuote(self)), nil
+`, stateShellVar, stateEnvKey, zshQuote(self))
 }
 
 // ExportResult is the outcome of evaluating a directory: the shell script to
