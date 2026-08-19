@@ -11,35 +11,24 @@ import (
 	"syscall"
 )
 
-// ErrUntrusted marks a config that exists but has no valid trust grant.
 var ErrUntrusted = errors.New("config is not trusted")
 
-// ErrUnsafeTrustStore marks a trust store that exists but could be tampered
-// with by another user (foreign owner or group/world-writable). A grant is
-// just a file whose existence authorizes applying a config's env (PATH
-// included), so if someone else can write to the store they can forge one;
-// no grant it holds can be trusted. This is what direnv #445 warns about.
+// ErrUnsafeTrustStore marks a trust store another user could write to (foreign
+// owner or group/world-writable): a grant is just a file whose existence
+// authorizes applying a config's env, so any grant it holds may be forged.
 var ErrUnsafeTrustStore = errors.New("trust store is not secure")
 
 // Trust records approvals as sha256(config identity + content), so any edit to
 // an approved config silently revokes the grant. Without this, cd-ing into a
 // cloned repository would apply attacker-controlled env vars (PATH included).
 
-// trustDir reports the one directory grants live in. It refuses to guess: a
-// store path that is not anchored at an absolute base would be resolved against
-// the working directory, and a per-directory store destroys the whole point of
-// the grant. Grants written in one directory would be invisible from the next
-// (untrust would answer "not trusted" while the grant is still on disk), and,
-// worse, any directory the user can cd into could carry its own pre-seeded
-// store: a cloned repository shipping .local/share/sallyport/trust/<hash>
-// alongside its config would be applied on arrival, which is exactly the
-// approval step sallyport exists to impose. Callers must treat the error as
-// "there is no store", not as "the store is empty".
+// trustDir reports the one directory grants live in. It refuses to guess rather
+// than fall back to a relative base: a cwd-relative store would be invisible
+// from the next directory, and any directory the user cd's into could carry its
+// own pre-seeded grants. Callers must treat the error as "there is no store",
+// not as "the store is empty".
 func trustDir() (string, error) {
 	base := os.Getenv("XDG_DATA_HOME")
-	// The XDG base directory spec requires a relative XDG_DATA_HOME to be
-	// ignored as invalid, and here that rule is load-bearing rather than
-	// pedantic: honouring one is precisely the cwd-relative store above.
 	if base != "" && !filepath.IsAbs(base) {
 		base = ""
 	}
@@ -48,9 +37,8 @@ func trustDir() (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("cannot locate the trust store: %w; set HOME, or XDG_DATA_HOME to an absolute path", err)
 		}
-		// os.UserHomeDir reports $HOME verbatim on unix, so a relative value
-		// arrives here without an error and would anchor the store at the
-		// working directory just as a relative XDG_DATA_HOME would.
+		// os.UserHomeDir hands back $HOME verbatim on unix, so a relative value
+		// arrives without an error and would anchor the store at the cwd.
 		if !filepath.IsAbs(home) {
 			return "", fmt.Errorf("cannot locate the trust store: home directory %q is not an absolute path; set HOME, or XDG_DATA_HOME to an absolute path", home)
 		}
@@ -59,9 +47,8 @@ func trustDir() (string, error) {
 	return filepath.Join(base, "sallyport", "trust"), nil
 }
 
-// ownerUID reports the owning uid of fi; the bool is false when the platform's
-// Sys() is not the unix shape sallyport targets, in which case ownership cannot
-// be proven and callers must refuse.
+// ownerUID reports the owning uid of fi. ok is false when Sys() is not the unix
+// shape sallyport targets: ownership cannot be proven, so callers must refuse.
 func ownerUID(fi os.FileInfo) (int, bool) {
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	if !ok {
@@ -70,10 +57,8 @@ func ownerUID(fi os.FileInfo) (int, bool) {
 	return int(st.Uid), true
 }
 
-// checkOwnerWritable rejects a path not owned by the current user or writable by
-// group or other. This is the strict form: it demands the user's own exclusive
-// ownership, used for the trust store, whose files (grants) sallyport itself
-// creates and no system component ever should.
+// checkOwnerWritable is the strict check, used for the trust store: it demands
+// the user's own exclusive ownership, unlike the config side (see trustedOwner).
 func checkOwnerWritable(path string, fi os.FileInfo) error {
 	uid, ok := ownerUID(fi)
 	if !ok {
@@ -88,21 +73,16 @@ func checkOwnerWritable(path string, fi os.FileInfo) error {
 	return nil
 }
 
-// trustedOwner reports whether a config-side path owned by uid is acceptable:
-// the current user, or root. Root is implicitly trusted because only root can
-// replace a root-owned path, and system config managers (Nix/home-manager place
-// the config and its symlink target in the root-owned store) depend on this.
-// The trust store itself does not use this relaxation — see checkOwnerWritable.
+// trustedOwner accepts the current user or root: only root can replace a
+// root-owned path, and Nix/home-manager place the config and its symlink target
+// in the root-owned store. The trust store does not get this relaxation.
 func trustedOwner(uid int) bool {
 	return uid == os.Getuid() || uid == 0
 }
 
-// checkConfigNode verifies a regular config file, a resolved symlink target, or
-// either of their parent directories: it must be owned by the user or root and
-// not writable by group or other, so only a trusted owner can change what
-// sallyport is about to read and approve. A directory is exempt from the
-// writable check when it is sticky (see below), which is what lets root-owned
-// configs under /nix/store be trusted.
+// checkConfigNode verifies a config file, a resolved symlink target, or either
+// of their parent directories: only a trusted owner may change what sallyport is
+// about to read and approve. Sticky directories are exempt (see below).
 func checkConfigNode(path string) error {
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -116,12 +96,10 @@ func checkConfigNode(path string) error {
 		return fmt.Errorf("%s is owned by uid %d (neither you, uid %d, nor root); chown it to yourself", path, uid, os.Getuid())
 	}
 	if fi.Mode().Perm()&0o022 != 0 {
-		// A group/world-writable directory is safe when it is sticky: the sticky
-		// bit lets only an entry's owner unlink or rename it, so no other user can
-		// rename-swap the root-owned config inside it. This is exactly how
-		// /nix/store (drwxrwxr-t) and /tmp are protected. Regular files get no
-		// such pass — a writable file is rewritten in place — and a non-sticky
-		// writable directory allows precisely the rename-swap we guard against.
+		// A group/world-writable directory is safe when it is sticky: only an
+		// entry's owner may unlink or rename it, so no other user can rename-swap
+		// the config inside it (/nix/store is drwxrwxr-t). A writable regular file
+		// gets no such pass, being rewritten in place.
 		if fi.IsDir() {
 			if fi.Mode()&os.ModeSticky != 0 {
 				return nil
@@ -133,9 +111,8 @@ func checkConfigNode(path string) error {
 	return nil
 }
 
-// checkLinkOwner verifies a symlink node itself. Only ownership is checked: a
-// symlink's permission bits are ignored by the kernel, so they protect nothing;
-// what matters is that only a trusted owner (the user or root) can repoint it.
+// checkLinkOwner checks only ownership: a symlink's permission bits are ignored
+// by the kernel, so what matters is who can repoint it.
 func checkLinkOwner(path string, li os.FileInfo) error {
 	uid, ok := ownerUID(li)
 	if !ok {
@@ -147,14 +124,10 @@ func checkLinkOwner(path string, li os.FileInfo) error {
 	return nil
 }
 
-// verifyTrustStore locates the trust store and rejects a directory an attacker
-// could tamper with, returning the path so callers reach the store only through
-// a location that passed both. A missing store is safe (it holds no grants) and
-// is not an error: Trust creates it with 0o700. A store whose location cannot be
-// determined at all is a different matter and is refused (see trustDir), since
-// the alternative is a working-directory store that any passer-by can seed.
-// Callers on the apply path treat any error here as "trust nothing"; Trust
-// treats it as a hard refusal.
+// verifyTrustStore locates the trust store and rejects one an attacker could
+// tamper with. A missing store holds no grants and is not an error (Trust
+// creates it with 0o700); a store whose location cannot be determined is
+// refused (see trustDir).
 func verifyTrustStore() (string, error) {
 	dir, err := trustDir()
 	if err != nil {
@@ -177,31 +150,17 @@ func verifyTrustStore() (string, error) {
 }
 
 // verifyConfigPath rejects a config an attacker could swap around the moment of
-// approval. A regular config is checked along with its parent directory (a
-// writable parent lets the file be replaced by rename even when it is
-// read-only). A symlinked config (Nix/home-manager) additionally has the link
-// node and the resolved target and the target's parent checked, so neither the
-// link nor its destination can be repointed or rewritten by an untrusted user.
-// Config-side ownership allows the user or root (see trustedOwner).
+// approval: the file and its parent directory (a writable parent allows a
+// rename swap even when the file itself is read-only), plus the link node, the
+// resolved target and the target's parent when the config is a symlink.
 //
-// The guarantee stops at that immediate parent: no higher ancestor is examined,
-// so nothing checks who may replace the parent itself. A writable non-sticky
-// directory anywhere above lets any user rename the entries inside it, which
-// swaps the whole subtree holding the config — the checked parent included —
-// for one the attacker controls. The fingerprint bounds only what happens to
-// the config bytes after that: a grant is sha256(identity + content), the
-// identity is derived from the path, and LoadTrustedConfig re-hashes the bytes
-// it is about to apply without re-running any of the checks here. A symlink
-// left at the swapped path resolves the identity elsewhere and so misses the
-// grant, but a renamed directory keeps the path, and an attacker who copies the
-// approved config byte for byte keeps the content too: the grant still matches
-// and the config still applies, over a tree that is now theirs, at any time
-// after approval. For a config of literal values that leaves the applied env
-// exactly as approved; for one whose values dereference the workspace
-// ("$WORKSPACE_PATH/bin" on PATH) it hands the attacker's tree to the shell.
-// The risk is accepted rather than closed: walking to the filesystem root would
-// reject legitimate shared project and home trees, whose upper directories are
-// group-writable by policy.
+// The checks stop at that immediate parent. A writable non-sticky directory
+// higher up lets any user rename away the subtree holding the config and put
+// their own in its place: a grant is sha256(identity + content) and the identity
+// is derived from the path, so a byte-identical copy at the same path still
+// applies, over a tree that is now theirs. Accepted rather than closed —
+// walking to the root would reject legitimate shared project and home trees,
+// whose upper directories are group-writable by policy.
 func verifyConfigPath(path string) error {
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -247,15 +206,12 @@ func canonical(path string) (string, error) {
 	return abs, nil
 }
 
-// configIdentity is a config's logical location: the canonical directory it
-// lives in joined with its file name, with the final element deliberately NOT
-// symlink-resolved. A config deployed as a symlink (Nix/home-manager) is thus
-// identified by where it sits, not where its target happens to point, so a
-// store-path change across a rebuild keeps the same identity while an edit to
-// the pointed-at bytes still changes the fingerprint. The directory IS resolved,
-// so directory aliases (/tmp -> /private/tmp, a symlinked checkout) still map to
-// one identity. Reading through this path follows the final symlink, so content
-// hashing and parsing see the target's bytes.
+// configIdentity is the canonical directory a config lives in joined with its
+// file name; the final element is deliberately NOT symlink-resolved. A config
+// deployed as a symlink (Nix/home-manager) keeps its identity across a rebuild
+// that moves the target, while an edit to the target's bytes still changes the
+// fingerprint. The directory IS resolved, so directory aliases map to one
+// identity.
 func configIdentity(path string) (string, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -288,18 +244,11 @@ func fingerprintBytes(abs string, content []byte) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// IsTrusted answers whether a grant exists for the bytes currently on disk,
-// without reading the config for use. Nothing on the apply path calls it, and
-// nothing should: asking here and applying afterwards reads the file twice and
-// reopens exactly the window LoadTrustedConfig exists to close, so every caller
-// that intends to act on the config goes through LoadTrustedConfig instead. It
-// stays for callers that only want to inspect grant state without applying it;
-// inside this repository those are the tests, which assert what Trust, Untrust
-// and Prune left behind.
+// IsTrusted answers whether a grant exists for the bytes currently on disk.
+// Nothing that intends to apply the config may use it: asking here and applying
+// afterwards reads the file twice and reopens the very window LoadTrustedConfig
+// exists to close. It is for inspecting grant state only.
 func IsTrusted(path string) bool {
-	// An insecure store means any grant it holds may be forged, and an
-	// unlocatable one means there is no store to consult; trust nothing either
-	// way.
 	dir, err := verifyTrustStore()
 	if err != nil {
 		return false
@@ -319,12 +268,8 @@ func IsTrusted(path string) bool {
 // exact bytes that were applied, so callers can detect an edit even when the
 // new content is already trusted again.
 func LoadTrustedConfig(path string) (Config, string, error) {
-	// A forgeable store invalidates every grant, so refuse before reading the
-	// config; the detail is wrapped so callers can match ErrUnsafeTrustStore. A
-	// store that cannot be located comes through the same branch on purpose: a
-	// grant that cannot be looked up in a trustworthy place is worth no more
-	// than one that could have been forged, and the apply path already treats
-	// this error as "apply nothing" while still telling the user why.
+	// A forgeable or unlocatable store invalidates every grant, so refuse before
+	// reading the config; wrapped so callers can match ErrUnsafeTrustStore.
 	dir, err := verifyTrustStore()
 	if err != nil {
 		return Config{}, "", fmt.Errorf("%w: %v", ErrUnsafeTrustStore, err)
@@ -351,8 +296,7 @@ func Trust(path string) error {
 		return err
 	}
 	// Reject a config someone else could swap between review and approval: the
-	// grant would then vouch for bytes the human never saw. Checks the link and
-	// its target when the config is a symlink (see verifyConfigPath).
+	// grant would then vouch for bytes the human never saw.
 	if err := verifyConfigPath(path); err != nil {
 		return fmt.Errorf("refusing to trust: %w", err)
 	}
@@ -360,18 +304,13 @@ func Trust(path string) error {
 	if err != nil {
 		return err
 	}
-	// Fingerprint before parsing, the same order as LoadTrustedConfig.
 	fp := fingerprintBytes(id, content)
-	// Approving bytes that cannot be parsed would create a grant the export
-	// path can never use, and would warn on every cd instead of failing here.
+	// A grant for unparseable bytes would warn on every cd instead of failing here.
 	if _, err := parseConfig(id, content); err != nil {
 		return fmt.Errorf("refusing to trust: %w", err)
 	}
-	// If the store already exists it must be secure before we add a grant to
-	// it; a missing store is created below with 0o700. Creating one is also why
-	// an unlocatable store has to stop us here rather than fall back to a
-	// relative path: the grant would be written into whatever directory the
-	// user happened to run the command from.
+	// An existing store must be secure before a grant joins it; a missing one is
+	// created below with 0o700.
 	dir, err := verifyTrustStore()
 	if err != nil {
 		return fmt.Errorf("refusing to trust: %w", err)
@@ -379,9 +318,8 @@ func Trust(path string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	// The record's content is the config identity, for humans inspecting the
-	// dir; lookups only ever use the filename. Written via rename: lookups test
-	// mere existence, so a crash mid-write must not leave an empty record
+	// The record's content is the config identity. Written via rename: lookups
+	// test mere existence, so a crash mid-write must not leave a partial record
 	// behind that would pass as a valid grant.
 	record := filepath.Join(dir, fp)
 	tmp := record + ".tmp"
@@ -395,28 +333,21 @@ func Trust(path string) error {
 	return nil
 }
 
-// listTrustStore lists the trust store's records. It is a variable purely so
-// tests can reproduce listing failures the filesystem cannot be made to produce
-// on demand — a saturated descriptor table, EIO, a stale NFS handle. Those all
-// have to be surfaced rather than answered with "not trusted", and a test that
-// can only manufacture EACCES cannot pin that down. Production always uses
-// os.ReadDir.
+// listTrustStore is a variable so tests can reproduce listing failures the
+// filesystem cannot be made to produce on demand (a saturated descriptor table,
+// EIO, a stale NFS handle), all of which have to be surfaced rather than
+// answered with "not trusted".
 var listTrustStore = os.ReadDir
 
 // Untrust matches records by their recorded config identity, not by a
 // fingerprint of the current content. A grant is keyed by sha256(identity +
-// content), so once the config is edited the current fingerprint no longer names
-// any record and the stale grant for the original bytes would survive on disk,
-// silently reviving trust the moment the content is restored. Removing every
-// record whose recorded identity is the target's logical identity revokes all of
-// them, including the one for the content presently on disk.
+// content), so once the config is edited the current fingerprint names no record
+// and the stale grant for the original bytes would survive on disk, reviving
+// trust the moment the content is restored.
 func Untrust(path string) error {
-	// Consistent with the other entry points: surface an insecure or unlocatable
-	// store rather than mutating it silently, so the user fixes it before
-	// relying on trust. An unlocatable store must not reach the "not trusted"
-	// verdict below either: the grant may well exist in the store the user
-	// meant, and revocation reporting success-shaped failure is how a live
-	// grant survives an untrust the user believes went through.
+	// Surface an insecure or unlocatable store rather than answering "not
+	// trusted": that verdict is how a live grant survives an untrust the user
+	// believes went through.
 	dir, err := verifyTrustStore()
 	if err != nil {
 		return fmt.Errorf("refusing to untrust: %w", err)
@@ -427,28 +358,20 @@ func Untrust(path string) error {
 	}
 	entries, err := listTrustStore(dir)
 	if os.IsNotExist(err) {
-		// No store at all means no grant was ever recorded: this is the ordinary
-		// "you never trusted this" case, the same answer as an empty match below.
 		return fmt.Errorf("not trusted: %s", path)
 	}
 	if err != nil {
 		// A permission or I/O error is not proof the grant is absent; a store the
-		// user cannot list may still hold a live grant. Reporting "not trusted"
-		// would send the user looking for the wrong problem, so surface the cause
-		// as Prune does.
+		// user cannot list may still hold a live grant.
 		return err
 	}
 	removed := 0
 	for _, e := range entries {
-		// .tmp leftovers are interrupted writes, not grants; empty records
-		// carry no path to match against.
 		if strings.HasSuffix(e.Name(), ".tmp") {
 			continue
 		}
-		// A grant is a file sallyport writes; a directory is somebody else's
-		// doing and can never be one, so stepping over it cannot leave a live
-		// grant behind. Reading it would fail with EISDIR, which the branch
-		// below rightly refuses to ignore, and one stray directory would then
+		// A directory can never be a grant, and reading it would fail with EISDIR,
+		// which the branch below refuses to ignore: one stray directory would then
 		// make every untrust impossible.
 		if e.IsDir() {
 			continue
@@ -456,22 +379,18 @@ func Untrust(path string) error {
 		record := filepath.Join(dir, e.Name())
 		data, err := os.ReadFile(record)
 		if os.IsNotExist(err) {
-			// A concurrent untrust or prune won the race: the record is gone,
-			// so it holds no grant to revoke.
+			// A concurrent untrust or prune won the race.
 			continue
 		}
 		if err != nil {
-			// The same reasoning as the listing above, one level down. A record
-			// that cannot be read may be the very grant being revoked, so
-			// skipping it would leave trust in force while the command reports
-			// "not trusted" and exits as if there were nothing to do.
+			// A record that cannot be read may be the very grant being revoked;
+			// skipping it would leave trust in force while reporting "not trusted".
 			return err
 		}
 		if strings.TrimSpace(string(data)) != target {
 			continue
 		}
-		// A concurrent untrust or prune may have removed the record first;
-		// the goal (no grant on disk) is met either way.
+		// A concurrent removal is fine: the goal, no grant on disk, is met.
 		if err := os.Remove(record); err != nil && !os.IsNotExist(err) {
 			return err
 		}
@@ -488,9 +407,6 @@ func Untrust(path string) error {
 // leftovers of interrupted writes. Grants for edited configs are kept on
 // purpose: restoring the original bytes legitimately revives them.
 func Prune() error {
-	// Consistent with the other entry points: surface an insecure or unlocatable
-	// store rather than mutating it silently, so the user fixes it before
-	// relying on trust.
 	dir, err := verifyTrustStore()
 	if err != nil {
 		return fmt.Errorf("refusing to prune: %w", err)
@@ -519,8 +435,6 @@ func Prune() error {
 		}
 		path := strings.TrimSpace(string(data))
 		if path == "" {
-			// Only an interrupted write by an older version leaves an empty
-			// record; it can never be matched intentionally.
 			if err := os.Remove(record); err != nil && !os.IsNotExist(err) {
 				return err
 			}
@@ -530,8 +444,7 @@ func Prune() error {
 		if _, err := os.Stat(path); err != nil {
 			if !os.IsNotExist(err) {
 				// A permission or I/O error is not proof the config is gone;
-				// removing the grant on a guess would revoke a still-valid one.
-				// Surface it and keep the record so the user can act.
+				// removing the grant on a guess would revoke a valid one.
 				Warn("cannot stat %s, keeping grant: %v", path, err)
 				continue
 			}

@@ -36,7 +36,6 @@ func (c *TrustCommand) Execute(_ context.Context, f *flag.FlagSet, _ ...interfac
 	return subcommands.ExitSuccess
 }
 
-// nearestConfig resolves the config governing pwd, shared by trust/untrust.
 func nearestConfig(f *flag.FlagSet, pwd, usage string) (string, subcommands.ExitStatus) {
 	if f.NArg() != 0 {
 		fmt.Fprint(os.Stderr, usage)

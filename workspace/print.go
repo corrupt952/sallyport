@@ -8,8 +8,7 @@ import (
 
 // out receives progress messages. A nil value is resolved to os.Stdout on each
 // call rather than captured once, so a caller that swaps the real stdout is
-// still honored; tests set it to a buffer to assert on messages instead of
-// leaking them into the test log.
+// still honored.
 var out io.Writer
 
 func progress(format string, a ...any) {

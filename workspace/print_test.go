@@ -5,8 +5,6 @@ import (
 	"testing"
 )
 
-// The progress helpers must write to the injected writer, so callers (and
-// tests) can capture output instead of leaking it to the real stdout.
 func TestProgressWritesToInjectedWriter(t *testing.T) {
 	var buf bytes.Buffer
 	out = &buf

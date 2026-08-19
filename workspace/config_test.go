@@ -7,8 +7,8 @@ import (
 	"testing"
 )
 
-// quoteJSON renders s as a JSON string literal; strconv.Quote's escaping of "
-// and \ is a valid subset of JSON for the ASCII values these tests use.
+// strconv.Quote's escaping of " and \ is a valid subset of JSON for the ASCII
+// values these tests use.
 func quoteJSON(s string) string { return strconv.Quote(s) }
 
 func writeConfig(t *testing.T, dir, content string) {
@@ -59,9 +59,8 @@ func TestLoadConfigRejectsNonStringValue(t *testing.T) {
 }
 
 func TestLoadConfigExpandRejectsUnquotableValue(t *testing.T) {
-	// In expand mode the value is emitted verbatim inside `export KEY="..."`,
-	// so content that cannot be a double-quoted body would break the line and
-	// fail the whole eval (state commit included); parseConfig must reject it.
+	// In expand mode the value is emitted verbatim inside `export KEY="..."`, so
+	// content that cannot be a double-quoted body fails the whole eval.
 	cases := map[string]string{
 		"unescaped double quote": `a"b`,
 		"trailing backslash":     `abc\`,
@@ -77,8 +76,7 @@ func TestLoadConfigExpandRejectsUnquotableValue(t *testing.T) {
 }
 
 func TestLoadConfigExpandAcceptsEscapedValue(t *testing.T) {
-	// Properly escaped sequences are legal double-quoted source text and must
-	// pass even in expand mode: a `\"` is a literal quote, a `\\` a backslash.
+	// Properly escaped sequences are legal double-quoted source text.
 	dir := t.TempDir()
 	writeConfig(t, dir, `{"expand": true, "env": {"FOO": `+quoteJSON(`a\"b\\c`)+`}}`)
 	cfg, err := LoadConfig(ConfigPath(dir))
@@ -91,9 +89,8 @@ func TestLoadConfigExpandAcceptsEscapedValue(t *testing.T) {
 }
 
 func TestLoadConfigStrictModeAcceptsAnyValue(t *testing.T) {
-	// Strict mode (the default) single-quotes values, so content that would be
-	// illegal inside double quotes is carried safely and must be accepted; the
-	// double-quote validation applies only in expand mode.
+	// Strict mode single-quotes values, so content that would be illegal inside
+	// double quotes is carried safely.
 	for _, val := range []string{`a"b`, `abc\`, `\`, `$(whoami)`} {
 		dir := t.TempDir()
 		writeConfig(t, dir, `{"env": {"FOO": `+quoteJSON(val)+`}}`)
@@ -149,9 +146,7 @@ func TestFindRoot(t *testing.T) {
 }
 
 // A .sallyport.jsonc symlinked to a regular file marks a workspace: Nix and
-// home-manager deploy configs as symlinks into a read-only store. A symlink to
-// a directory or a dangling symlink does not resolve to a regular file, so
-// neither names a config.
+// home-manager deploy configs as symlinks into a read-only store.
 func TestFindRootFollowsSymlinkToRegularFile(t *testing.T) {
 	base := t.TempDir()
 
@@ -202,7 +197,6 @@ func TestWorkspaceVars(t *testing.T) {
 		t.Fatal(err)
 	}
 	vars := WorkspaceVars(dir, cfg)
-	// Strict mode is the default, so config values are literal (single-quoted).
 	want := []EnvVar{
 		{Key: "WORKSPACE_PATH", Val: dir, Literal: true},
 		{Key: "A_KEY", Val: "a", Literal: true},
@@ -227,8 +221,7 @@ func TestWorkspaceVarsExpandMakesValuesNonLiteral(t *testing.T) {
 		t.Fatal(err)
 	}
 	vars := WorkspaceVars(dir, cfg)
-	// Expand mode double-quotes config values; the automatic WORKSPACE_PATH
-	// stays literal regardless.
+	// The automatic WORKSPACE_PATH stays literal even in expand mode.
 	want := []EnvVar{
 		{Key: "WORKSPACE_PATH", Val: dir, Literal: true},
 		{Key: "A_KEY", Val: "a", Literal: false},
@@ -252,7 +245,6 @@ func TestWorkspaceVarsExplicitWorkspacePathWins(t *testing.T) {
 		t.Fatal(err)
 	}
 	vars := WorkspaceVars(dir, cfg)
-	// Strict mode: the explicit value is literal like any other.
 	if len(vars) != 1 || vars[0] != (EnvVar{Key: "WORKSPACE_PATH", Val: "/custom", Literal: true}) {
 		t.Errorf("got %v, want single custom WORKSPACE_PATH", vars)
 	}
