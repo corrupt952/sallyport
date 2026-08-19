@@ -25,13 +25,38 @@ var ErrUnsafeTrustStore = errors.New("trust store is not secure")
 // an approved config silently revokes the grant. Without this, cd-ing into a
 // cloned repository would apply attacker-controlled env vars (PATH included).
 
-func trustDir() string {
+// trustDir reports the one directory grants live in. It refuses to guess: a
+// store path that is not anchored at an absolute base would be resolved against
+// the working directory, and a per-directory store destroys the whole point of
+// the grant. Grants written in one directory would be invisible from the next
+// (untrust would answer "not trusted" while the grant is still on disk), and,
+// worse, any directory the user can cd into could carry its own pre-seeded
+// store: a cloned repository shipping .local/share/sallyport/trust/<hash>
+// alongside its config would be applied on arrival, which is exactly the
+// approval step sallyport exists to impose. Callers must treat the error as
+// "there is no store", not as "the store is empty".
+func trustDir() (string, error) {
 	base := os.Getenv("XDG_DATA_HOME")
-	if base == "" {
-		h, _ := os.UserHomeDir()
-		base = filepath.Join(h, ".local", "share")
+	// The XDG base directory spec requires a relative XDG_DATA_HOME to be
+	// ignored as invalid, and here that rule is load-bearing rather than
+	// pedantic: honouring one is precisely the cwd-relative store above.
+	if base != "" && !filepath.IsAbs(base) {
+		base = ""
 	}
-	return filepath.Join(base, "sallyport", "trust")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("cannot locate the trust store: %w; set HOME, or XDG_DATA_HOME to an absolute path", err)
+		}
+		// os.UserHomeDir reports $HOME verbatim on unix, so a relative value
+		// arrives here without an error and would anchor the store at the
+		// working directory just as a relative XDG_DATA_HOME would.
+		if !filepath.IsAbs(home) {
+			return "", fmt.Errorf("cannot locate the trust store: home directory %q is not an absolute path; set HOME, or XDG_DATA_HOME to an absolute path", home)
+		}
+		base = filepath.Join(home, ".local", "share")
+	}
+	return filepath.Join(base, "sallyport", "trust"), nil
 }
 
 // ownerUID reports the owning uid of fi; the bool is false when the platform's
@@ -122,23 +147,33 @@ func checkLinkOwner(path string, li os.FileInfo) error {
 	return nil
 }
 
-// verifyTrustStore rejects a trust directory an attacker could tamper with. A
-// missing store is safe (it holds no grants) and is not an error: Trust creates
-// it with 0o700. Callers on the apply path treat any error here as "trust
-// nothing"; Trust treats it as a hard refusal.
-func verifyTrustStore() error {
-	dir := trustDir()
+// verifyTrustStore locates the trust store and rejects a directory an attacker
+// could tamper with, returning the path so callers reach the store only through
+// a location that passed both. A missing store is safe (it holds no grants) and
+// is not an error: Trust creates it with 0o700. A store whose location cannot be
+// determined at all is a different matter and is refused (see trustDir), since
+// the alternative is a working-directory store that any passer-by can seed.
+// Callers on the apply path treat any error here as "trust nothing"; Trust
+// treats it as a hard refusal.
+func verifyTrustStore() (string, error) {
+	dir, err := trustDir()
+	if err != nil {
+		return "", err
+	}
 	fi, err := os.Stat(dir)
 	if os.IsNotExist(err) {
-		return nil
+		return dir, nil
 	}
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !fi.IsDir() {
-		return fmt.Errorf("%s exists but is not a directory; remove it", dir)
+		return "", fmt.Errorf("%s exists but is not a directory; remove it", dir)
 	}
-	return checkOwnerWritable(dir, fi)
+	if err := checkOwnerWritable(dir, fi); err != nil {
+		return "", err
+	}
+	return dir, nil
 }
 
 // verifyConfigPath rejects a config an attacker could swap around the moment of
@@ -262,15 +297,18 @@ func fingerprintBytes(abs string, content []byte) string {
 // inside this repository those are the tests, which assert what Trust, Untrust
 // and Prune left behind.
 func IsTrusted(path string) bool {
-	// An insecure store means any grant it holds may be forged; trust nothing.
-	if verifyTrustStore() != nil {
+	// An insecure store means any grant it holds may be forged, and an
+	// unlocatable one means there is no store to consult; trust nothing either
+	// way.
+	dir, err := verifyTrustStore()
+	if err != nil {
 		return false
 	}
 	fp, err := fingerprint(path)
 	if err != nil {
 		return false
 	}
-	_, err = os.Stat(filepath.Join(trustDir(), fp))
+	_, err = os.Stat(filepath.Join(dir, fp))
 	return err == nil
 }
 
@@ -282,8 +320,13 @@ func IsTrusted(path string) bool {
 // new content is already trusted again.
 func LoadTrustedConfig(path string) (Config, string, error) {
 	// A forgeable store invalidates every grant, so refuse before reading the
-	// config; the detail is wrapped so callers can match ErrUnsafeTrustStore.
-	if err := verifyTrustStore(); err != nil {
+	// config; the detail is wrapped so callers can match ErrUnsafeTrustStore. A
+	// store that cannot be located comes through the same branch on purpose: a
+	// grant that cannot be looked up in a trustworthy place is worth no more
+	// than one that could have been forged, and the apply path already treats
+	// this error as "apply nothing" while still telling the user why.
+	dir, err := verifyTrustStore()
+	if err != nil {
 		return Config{}, "", fmt.Errorf("%w: %v", ErrUnsafeTrustStore, err)
 	}
 	id, err := configIdentity(path)
@@ -295,7 +338,7 @@ func LoadTrustedConfig(path string) (Config, string, error) {
 		return Config{}, "", err
 	}
 	fp := fingerprintBytes(id, content)
-	if _, err := os.Stat(filepath.Join(trustDir(), fp)); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, fp)); err != nil {
 		return Config{}, "", ErrUntrusted
 	}
 	cfg, err := parseConfig(id, content)
@@ -325,18 +368,22 @@ func Trust(path string) error {
 		return fmt.Errorf("refusing to trust: %w", err)
 	}
 	// If the store already exists it must be secure before we add a grant to
-	// it; a missing store is created below with 0o700.
-	if err := verifyTrustStore(); err != nil {
+	// it; a missing store is created below with 0o700. Creating one is also why
+	// an unlocatable store has to stop us here rather than fall back to a
+	// relative path: the grant would be written into whatever directory the
+	// user happened to run the command from.
+	dir, err := verifyTrustStore()
+	if err != nil {
 		return fmt.Errorf("refusing to trust: %w", err)
 	}
-	if err := os.MkdirAll(trustDir(), 0o700); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	// The record's content is the config identity, for humans inspecting the
 	// dir; lookups only ever use the filename. Written via rename: lookups test
 	// mere existence, so a crash mid-write must not leave an empty record
 	// behind that would pass as a valid grant.
-	record := filepath.Join(trustDir(), fp)
+	record := filepath.Join(dir, fp)
 	tmp := record + ".tmp"
 	if err := os.WriteFile(tmp, []byte(id+"\n"), 0o600); err != nil {
 		return err
@@ -364,16 +411,21 @@ var listTrustStore = os.ReadDir
 // record whose recorded identity is the target's logical identity revokes all of
 // them, including the one for the content presently on disk.
 func Untrust(path string) error {
-	// Consistent with the other entry points: surface an insecure store rather
-	// than mutating it silently, so the user fixes it before relying on trust.
-	if err := verifyTrustStore(); err != nil {
+	// Consistent with the other entry points: surface an insecure or unlocatable
+	// store rather than mutating it silently, so the user fixes it before
+	// relying on trust. An unlocatable store must not reach the "not trusted"
+	// verdict below either: the grant may well exist in the store the user
+	// meant, and revocation reporting success-shaped failure is how a live
+	// grant survives an untrust the user believes went through.
+	dir, err := verifyTrustStore()
+	if err != nil {
 		return fmt.Errorf("refusing to untrust: %w", err)
 	}
 	target, err := configIdentity(path)
 	if err != nil {
 		return err
 	}
-	entries, err := listTrustStore(trustDir())
+	entries, err := listTrustStore(dir)
 	if os.IsNotExist(err) {
 		// No store at all means no grant was ever recorded: this is the ordinary
 		// "you never trusted this" case, the same answer as an empty match below.
@@ -401,7 +453,7 @@ func Untrust(path string) error {
 		if e.IsDir() {
 			continue
 		}
-		record := filepath.Join(trustDir(), e.Name())
+		record := filepath.Join(dir, e.Name())
 		data, err := os.ReadFile(record)
 		if os.IsNotExist(err) {
 			// A concurrent untrust or prune won the race: the record is gone,
@@ -436,12 +488,14 @@ func Untrust(path string) error {
 // leftovers of interrupted writes. Grants for edited configs are kept on
 // purpose: restoring the original bytes legitimately revives them.
 func Prune() error {
-	// Consistent with the other entry points: surface an insecure store rather
-	// than mutating it silently, so the user fixes it before relying on trust.
-	if err := verifyTrustStore(); err != nil {
+	// Consistent with the other entry points: surface an insecure or unlocatable
+	// store rather than mutating it silently, so the user fixes it before
+	// relying on trust.
+	dir, err := verifyTrustStore()
+	if err != nil {
 		return fmt.Errorf("refusing to prune: %w", err)
 	}
-	entries, err := listTrustStore(trustDir())
+	entries, err := listTrustStore(dir)
 	if os.IsNotExist(err) {
 		Info("nothing to prune")
 		return nil
@@ -451,7 +505,7 @@ func Prune() error {
 	}
 	removed := 0
 	for _, e := range entries {
-		record := filepath.Join(trustDir(), e.Name())
+		record := filepath.Join(dir, e.Name())
 		if strings.HasSuffix(e.Name(), ".tmp") {
 			if err := os.Remove(record); err != nil && !os.IsNotExist(err) {
 				return err

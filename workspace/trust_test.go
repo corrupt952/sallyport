@@ -18,6 +18,19 @@ func trustSetup(t *testing.T) string {
 	return ConfigPath(dir)
 }
 
+// storeDir is the store path for tests that reach into it directly. They all
+// run after trustSetup has pointed XDG_DATA_HOME at a temp dir, so a resolution
+// failure here means the fixture is broken, not that the refusal under test
+// fired; the tests that do exercise that refusal call trustDir themselves.
+func storeDir(t *testing.T) string {
+	t.Helper()
+	dir, err := trustDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func TestTrustLifecycle(t *testing.T) {
 	path := trustSetup(t)
 
@@ -108,7 +121,7 @@ func TestUntrustReportsUnlistableStore(t *testing.T) {
 	// failure therefore only surfaces when the records are listed, and the grant
 	// is still on disk at that point, so answering "not trusted" would deny a
 	// trust that exists and point the user at the wrong problem.
-	store := trustDir()
+	store := storeDir(t)
 	if err := os.Chmod(store, 0o000); err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +158,7 @@ func TestUntrustSurfacesNonPermissionListingFailure(t *testing.T) {
 	// sails through an exhausted descriptor table while the ReadDir right after
 	// it fails with EMFILE. EIO and a stale NFS handle land the same way. None
 	// of them can be arranged from a test on demand, hence listTrustStore.
-	failure := &fs.PathError{Op: "open", Path: trustDir(), Err: syscall.EMFILE}
+	failure := &fs.PathError{Op: "open", Path: storeDir(t), Err: syscall.EMFILE}
 	listTrustStore = func(string) ([]os.DirEntry, error) { return nil, failure }
 	t.Cleanup(func() { listTrustStore = os.ReadDir })
 
@@ -171,14 +184,14 @@ func TestUntrustReportsUnreadableRecord(t *testing.T) {
 	// leaves the grant in force while the loop finds no match and reports "not
 	// trusted": the same lie as an unlistable store, one level down, and this
 	// one also makes the config impossible to revoke.
-	entries, err := os.ReadDir(trustDir())
+	entries, err := os.ReadDir(storeDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(entries) != 1 {
 		t.Fatalf("got %d records after Trust, want 1", len(entries))
 	}
-	record := filepath.Join(trustDir(), entries[0].Name())
+	record := filepath.Join(storeDir(t), entries[0].Name())
 	if err := os.Chmod(record, 0o000); err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +222,7 @@ func TestUntrustSkipsDirectoriesInStore(t *testing.T) {
 	// fails with EISDIR, and the unreadable-record branch refuses to ignore a
 	// failed read. Without the directory being stepped over, one stray directory
 	// would make every untrust impossible.
-	if err := os.Mkdir(filepath.Join(trustDir(), "stray"), 0o700); err != nil {
+	if err := os.Mkdir(filepath.Join(storeDir(t), "stray"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 
@@ -293,17 +306,17 @@ func TestPruneRemovesTmpAndEmptyRecords(t *testing.T) {
 	}
 	// A crashed write of an older version can leave a .tmp leftover and an
 	// empty record; both must be pruned while the real grant survives.
-	if err := os.WriteFile(filepath.Join(trustDir(), "leftover.tmp"), []byte("x"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(storeDir(t), "leftover.tmp"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(trustDir(), "empty"), nil, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(storeDir(t), "empty"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	if err := Prune(); err != nil {
 		t.Fatal(err)
 	}
-	entries, err := os.ReadDir(trustDir())
+	entries, err := os.ReadDir(storeDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +346,7 @@ func TestInsecureStoreInvalidatesGrants(t *testing.T) {
 	}
 	// A group-writable store lets another user forge grants, so every grant it
 	// holds must stop counting until the mode is fixed.
-	if err := os.Chmod(trustDir(), 0o770); err != nil {
+	if err := os.Chmod(storeDir(t), 0o770); err != nil {
 		t.Fatal(err)
 	}
 	if IsTrusted(path) {
@@ -352,12 +365,188 @@ func TestTrustRefusesInsecureStore(t *testing.T) {
 	}
 	// World-writable store: adding a grant to it would let anyone tamper with
 	// the whole set.
-	if err := os.Chmod(trustDir(), 0o707); err != nil {
+	if err := os.Chmod(storeDir(t), 0o707); err != nil {
 		t.Fatal(err)
 	}
 	if err := Trust(path); err == nil {
 		t.Error("Trust accepted a world-writable store")
 	}
+}
+
+// unlocatableStoreCases are the environments in which trustDir has no absolute
+// base to anchor the store on. rel records where the store would land relative
+// to the working directory if the base were used anyway — the pre-fix behaviour
+// — which is what lets the tests below plant a grant exactly where the broken
+// code would have looked for one.
+var unlocatableStoreCases = []struct {
+	name string
+	// home and xdg are the values of HOME and XDG_DATA_HOME; empty means the
+	// variable is absent rather than empty, which is the case os.UserHomeDir
+	// reacts to.
+	home string
+	xdg  string
+	rel  string
+}{
+	{name: "no home, no xdg", rel: filepath.Join(".local", "share")},
+	// os.UserHomeDir hands back $HOME verbatim, so a relative one arrives
+	// without an error and used to anchor the store just as an absent one did.
+	{name: "relative home", home: "relhome", rel: filepath.Join("relhome", ".local", "share")},
+	// The XDG spec requires a relative XDG_DATA_HOME to be treated as unset;
+	// honouring it reaches the same working-directory store by another route.
+	{name: "relative xdg", xdg: "reldata", rel: "reldata"},
+}
+
+// unlocatableStore applies one of those environments and moves the test into an
+// empty working directory, which is where a store built from a relative base
+// lands. Anything appearing in that directory afterwards is therefore the store
+// leaking into the working directory rather than test noise.
+func unlocatableStore(t *testing.T, home, xdg string) string {
+	t.Helper()
+	// t.Setenv restores the previous value at cleanup even when the variable is
+	// unset right after, which is how this package arranges for absence.
+	t.Setenv("HOME", home)
+	if home == "" {
+		_ = os.Unsetenv("HOME")
+	}
+	t.Setenv("XDG_DATA_HOME", xdg)
+	if xdg == "" {
+		_ = os.Unsetenv("XDG_DATA_HOME")
+	}
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	return cwd
+}
+
+// assertNothingWritten reports any entry created under dir. It deliberately does
+// not look for the store's own path segments: a fix that only renamed the
+// fallback, or moved it one directory up, would still leave the store anchored
+// at wherever the user happens to stand, so the property is that the working
+// directory is not written to at all.
+func assertNothingWritten(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		t.Errorf("%s appeared in the working directory %s; the trust store must never be anchored there", e.Name(), dir)
+	}
+}
+
+// A store whose location cannot be determined is not an empty store: answering
+// as if it were is what let `trust` write a grant into the working directory,
+// where `untrust` run one directory over reported "not trusted" while the grant
+// was still on disk. Every entry point has to refuse instead, and none of them
+// may fall back to a relative path on the way.
+func TestTrustEntryPointsRefuseAnUnlocatableStore(t *testing.T) {
+	for _, tc := range unlocatableStoreCases {
+		t.Run(tc.name, func(t *testing.T) {
+			cwd := unlocatableStore(t, tc.home, tc.xdg)
+			dir := t.TempDir()
+			writeConfig(t, dir, `{"env": {}}`)
+			path := ConfigPath(dir)
+
+			err := Trust(path)
+			if err == nil {
+				t.Error("Trust recorded a grant with nowhere to record it")
+			} else if !strings.Contains(err.Error(), "trust store") {
+				// The user can only fix this by setting HOME or XDG_DATA_HOME,
+				// so the message has to say which thing could not be found.
+				t.Errorf("Trust: got %v, want an error naming the trust store", err)
+			}
+			if IsTrusted(path) {
+				t.Error("IsTrusted answered yes without a store to answer from")
+			}
+			if _, _, err := LoadTrustedConfig(path); !errors.Is(err, ErrUnsafeTrustStore) {
+				t.Errorf("LoadTrustedConfig: got %v, want ErrUnsafeTrustStore", err)
+			}
+			err = Untrust(path)
+			if err == nil {
+				t.Error("Untrust reported success without a store to revoke from")
+			} else if strings.HasPrefix(err.Error(), "not trusted:") {
+				// Same lie as the unlistable store above: the grant may exist in
+				// the store the user meant, and the verdict sends them away
+				// believing the revocation happened.
+				t.Errorf("unlocatable store reported as not trusted: %v", err)
+			}
+			if err := Prune(); err == nil {
+				t.Error("Prune walked a store it could not locate")
+			}
+			assertNothingWritten(t, cwd)
+		})
+	}
+}
+
+// The dangerous half of the bug is not where `trust` writes but where the apply
+// path reads. With the store anchored at the working directory, a cloned
+// repository could ship .local/share/sallyport/trust/<fingerprint> next to its
+// config and have its env applied on the first cd, which is the human approval
+// step sallyport exists to impose. The grants planted here are byte-for-byte
+// what the pre-fix code accepted.
+func TestUnlocatableStoreIgnoresGrantsPlantedInTheWorkingDirectory(t *testing.T) {
+	for _, tc := range unlocatableStoreCases {
+		t.Run(tc.name, func(t *testing.T) {
+			cwd := unlocatableStore(t, tc.home, tc.xdg)
+			writeConfig(t, cwd, `{"env": {"PLANTED": "yes"}}`)
+			path := ConfigPath(cwd)
+			id, err := configIdentity(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			content, err := os.ReadFile(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := filepath.Join(cwd, tc.rel, "sallyport", "trust")
+			if err := os.MkdirAll(store, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(store, fingerprintBytes(id, content)), []byte(id+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			cfg, _, err := LoadTrustedConfig(path)
+			if !errors.Is(err, ErrUnsafeTrustStore) {
+				t.Errorf("LoadTrustedConfig: got %v, want ErrUnsafeTrustStore", err)
+			}
+			if len(cfg.Env) != 0 {
+				t.Errorf("planted grant applied %v", cfg.Env)
+			}
+			if IsTrusted(path) {
+				t.Error("a grant planted in the working directory was honored")
+			}
+		})
+	}
+}
+
+// The relative XDG_DATA_HOME is dropped, not fatal: HOME is still a perfectly
+// good base and the spec says to fall back to it. Without this, refusing the
+// relative value could just as well have been implemented by refusing every
+// invocation that has one set, which breaks users whose shell exports one.
+func TestRelativeXDGDataHomeFallsBackToHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", "reldata")
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	dir := t.TempDir()
+	writeConfig(t, dir, `{"env": {}}`)
+	path := ConfigPath(dir)
+
+	if err := Trust(path); err != nil {
+		t.Fatal(err)
+	}
+	if !IsTrusted(path) {
+		t.Error("config not trusted after Trust")
+	}
+	entries, err := os.ReadDir(filepath.Join(home, ".local", "share", "sallyport", "trust"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("got %d records in the home store, want 1", len(entries))
+	}
+	assertNothingWritten(t, cwd)
 }
 
 func TestTrustRefusesWritableConfigFile(t *testing.T) {
@@ -402,7 +591,7 @@ func TestPruneRemovesStaleRecords(t *testing.T) {
 	if err := Prune(); err != nil {
 		t.Fatal(err)
 	}
-	entries, err := os.ReadDir(trustDir())
+	entries, err := os.ReadDir(storeDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}

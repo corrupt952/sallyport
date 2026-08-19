@@ -106,10 +106,17 @@ func forgeGrant(t *testing.T, root string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(trustDir(), 0o700); err != nil {
+	// The store has to be locatable for a forged grant to mean anything; the
+	// tests here set XDG_DATA_HOME to a temp dir, so a failure is a broken
+	// fixture rather than the refusal trustDir exists to produce.
+	store, err := trustDir()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(trustDir(), fingerprintBytes(abs, content)), []byte(abs+"\n"), 0o600); err != nil {
+	if err := os.MkdirAll(store, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store, fingerprintBytes(abs, content)), []byte(abs+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -772,7 +779,11 @@ func TestExportUnsafeTrustStoreWarningGating(t *testing.T) {
 	}
 	root := newWorkspaceDir(t, `{"env": {"OP_ACCOUNT": "x"}}`)
 	// Make the store forgeable after the grant was recorded.
-	if err := os.Chmod(trustDir(), 0o770); err != nil {
+	store, err := trustDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(store, 0o770); err != nil {
 		t.Fatal(err)
 	}
 
