@@ -36,10 +36,16 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      # The real-zsh regression tests skip silently when zsh is missing;
-      # install it so CI actually exercises the shim. macOS ships zsh.
+      # The real-zsh regression tests skip when zsh is missing; install it so
+      # this job exercises the shim too. macOS ships zsh. Bounded and allowed to
+      # fail because the step reaches an apt mirror: a stalled mirror otherwise
+      # consumes the job's whole timeout and reports a failure that has nothing
+      # to do with the change under test. When it does fail the zsh tests skip
+      # here, and macOS still runs them.
       - name: Install zsh
         if: runner.os == 'Linux'
+        timeout-minutes: 2
+        continue-on-error: true
         run: sudo apt-get update && sudo apt-get install -y zsh
       # -count=1 defeats the test cache; the zsh integration tests depend on
       # the environment, not only the source.
