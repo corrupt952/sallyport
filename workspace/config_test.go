@@ -1,9 +1,11 @@
 package workspace
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -105,15 +107,60 @@ func TestLoadConfigStrictModeAcceptsAnyValue(t *testing.T) {
 	}
 }
 
+// wantMaxConfigSize is the size limit spelled out independently of
+// maxConfigSize, so that raising or dropping the limit fails these tests
+// instead of moving with them.
+const wantMaxConfigSize = 1 << 20
+
+// writeConfigOfSize writes a valid config whose encoded form is exactly n bytes.
+func writeConfigOfSize(t *testing.T, dir string, n int) {
+	t.Helper()
+	const prefix, suffix = `{"env": {"PAD": "`, `"}}`
+	if n < len(prefix)+len(suffix) {
+		t.Fatalf("size %d is below the smallest config", n)
+	}
+	writeConfig(t, dir, prefix+strings.Repeat("x", n-len(prefix)-len(suffix))+suffix)
+}
+
 func TestLoadConfigRejectsOversizedFile(t *testing.T) {
 	dir := t.TempDir()
-	huge := append(make([]byte, 0, maxConfigSize+64), `{"env": {}}`...)
-	huge = append(huge, make([]byte, maxConfigSize)...)
-	if err := os.WriteFile(filepath.Join(dir, ConfigFileName), huge, 0o644); err != nil {
+	writeConfigOfSize(t, dir, wantMaxConfigSize+1)
+	_, err := LoadConfig(ConfigPath(dir))
+	if err == nil {
+		t.Fatal("oversized config accepted, want error")
+	}
+	// The payload is well-formed, and the message must name the size limit: an
+	// error for any other reason would let the limit be raised or removed
+	// without this test noticing.
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("error = %v, want the size limit to be the reason", err)
+	}
+}
+
+func TestLoadConfigAcceptsFileAtSizeLimit(t *testing.T) {
+	// The boundary itself is legal: exactly the limit must still load.
+	dir := t.TempDir()
+	writeConfigOfSize(t, dir, wantMaxConfigSize)
+	cfg, err := LoadConfig(ConfigPath(dir))
+	if err != nil {
+		t.Fatalf("config of exactly %d bytes rejected: %v", wantMaxConfigSize, err)
+	}
+	if cfg.Env["PAD"] == "" {
+		t.Error("config at the size limit parsed without its env entry")
+	}
+}
+
+func TestParseConfigLeavesInputUnmodified(t *testing.T) {
+	// hujson.Standardize rewrites its input buffer in place. Callers fingerprint
+	// the very bytes they hand to parseConfig, so a parse that mutated them would
+	// make the recorded fingerprint depend on parse order.
+	src := []byte("{\n  // comment\n  \"env\": {\"FOO\": \"bar\"}, // trailing\n}\n")
+	want := append([]byte(nil), src...)
+	if _, err := parseConfig("cfg.jsonc", src); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadConfig(ConfigPath(dir)); err == nil {
-		t.Error("oversized config accepted, want error")
+	if !bytes.Equal(src, want) {
+		t.Errorf("parseConfig modified its input:\n got %q\nwant %q", src, want)
 	}
 }
 
