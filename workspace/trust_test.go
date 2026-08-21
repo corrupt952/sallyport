@@ -343,7 +343,7 @@ func TestFingerprintIsAFullSHA256(t *testing.T) {
 	got := fingerprintBytes(path, []byte(content))
 
 	if len(got) != sha256.Size*2 {
-		t.Errorf("fingerprint is %d hex chars, want %d: a shorter name collides sooner", len(got), sha256.Size*2)
+		t.Errorf("fingerprint is %d hex chars, want %d: a shorter name collides sooner, and a different digest orphans every grant on disk", len(got), sha256.Size*2)
 	}
 	if _, err := hex.DecodeString(got); err != nil {
 		t.Errorf("fingerprint %q is not hex: %v", got, err)
