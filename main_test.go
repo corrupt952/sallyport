@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -27,6 +28,11 @@ func TestMain(m *testing.M) {
 		main()
 		return
 	}
+	// t.TempDir creates the directory it returns with os.Mkdir(dir, 0o777), so
+	// under a permissive umask the workspaces below take group and world write
+	// bits and the path checks refuse them -- correctly, and for a reason no
+	// test here is about. The other two packages fix it for the same reason.
+	syscall.Umask(0o022)
 	os.Exit(m.Run())
 }
 
@@ -38,7 +44,22 @@ type result struct {
 
 func run(t *testing.T, args ...string) result {
 	t.Helper()
-	return runIn(t, t.TempDir(), t.TempDir(), args...)
+	dir, home := newHome(t)
+	return runIn(t, dir, home, args...)
+}
+
+// newHome returns a working directory inside the home it also returns. The path
+// checks stop at the home, so a working directory beside it rather than under
+// it leaves the walk running to the filesystem root -- which a Nix builder owns
+// as neither the build user nor root, and rightly refuses.
+func newHome(t *testing.T) (dir, home string) {
+	t.Helper()
+	home = t.TempDir()
+	dir = filepath.Join(home, "ws")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir, home
 }
 
 // runIn starts this binary as sallyport in dir. stdout and stderr are captured
@@ -79,7 +100,7 @@ func writeWorkspace(t *testing.T, dir string) {
 
 func trustedWorkspace(t *testing.T) (dir, home string) {
 	t.Helper()
-	dir, home = t.TempDir(), t.TempDir()
+	dir, home = newHome(t)
 	writeWorkspace(t, dir)
 	if res := runIn(t, dir, home, "trust"); res.code != 0 {
 		t.Fatalf("trust exited %d: %s", res.code, res.stderr)
@@ -172,7 +193,10 @@ func TestExportWritesTheScriptToStdoutAndWarningsToStderr(t *testing.T) {
 	}
 
 	// An untrusted workspace warns, and that warning must not be eval'd.
-	untrusted := t.TempDir()
+	untrusted := filepath.Join(home, "other")
+	if err := os.Mkdir(untrusted, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	writeWorkspace(t, untrusted)
 	res = runIn(t, untrusted, home, "export", "zsh")
 	if !strings.Contains(res.stderr, "sallyport:") {
@@ -187,9 +211,8 @@ func TestExportWritesTheScriptToStdoutAndWarningsToStderr(t *testing.T) {
 // turns each prompt into an error, and an ignored one puts a warning on every
 // one of them.
 func TestQuietIsAcceptedAndObeyed(t *testing.T) {
-	dir := t.TempDir()
+	dir, home := newHome(t)
 	writeWorkspace(t, dir)
-	home := t.TempDir()
 
 	res := runIn(t, dir, home, "export", "-quiet", "zsh")
 	if strings.Contains(res.stderr, "flag provided but not defined") {
@@ -212,7 +235,7 @@ func TestQuietIsAcceptedAndObeyed(t *testing.T) {
 // answering a question. Nothing held their success paths, so "always fails" and
 // "succeeds with a usage error" both passed.
 func TestCreateAndPruneSucceedAndSayWhatHappened(t *testing.T) {
-	dir, home := t.TempDir(), t.TempDir()
+	dir, home := newHome(t)
 	created := runIn(t, dir, home, "create")
 	if created.code != 0 {
 		t.Fatalf("create exited %d: %s", created.code, created.stderr)
