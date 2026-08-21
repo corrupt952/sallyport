@@ -29,7 +29,12 @@ func writeConfig(t *testing.T, dir string) {
 
 func TestNearestConfigFound(t *testing.T) {
 	silenceOutput(t)
-	root := t.TempDir()
+	// Resolved because nearestConfig answers with the directories the kernel
+	// names, and t.TempDir hands back an alias on macOS.
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	writeConfig(t, root)
 	sub := filepath.Join(root, "a", "b")
 	if err := os.MkdirAll(sub, 0o755); err != nil {

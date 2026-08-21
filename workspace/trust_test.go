@@ -438,6 +438,10 @@ var unlocatableStoreCases = []struct {
 // empty working directory, where a store built from a relative base lands.
 func unlocatableStore(t *testing.T, home, xdg string) string {
 	t.Helper()
+	// See withUnusableHome: with no home there is no boundary, and the walk to
+	// the filesystem root would answer before the store lookup these cases are
+	// about.
+	t.Setenv(pathCheckOptOut, "1")
 	// t.Setenv restores the previous value at cleanup even when the variable is
 	// unset right after, which is how this package arranges for absence.
 	t.Setenv("HOME", home)
@@ -556,7 +560,13 @@ func TestRelativeXDGDataHomeFallsBackToHome(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", "reldata")
 	cwd := t.TempDir()
 	t.Chdir(cwd)
-	dir := t.TempDir()
+	// Inside the home, so the walk that checks the path stops there. A sibling
+	// of the home is not below it, and the walk would carry on to the
+	// filesystem root.
+	dir := filepath.Join(home, "ws")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	writeConfig(t, dir, `{"env": {}}`)
 	path := ConfigPath(dir)
 

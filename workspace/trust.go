@@ -18,6 +18,10 @@ var ErrUntrusted = errors.New("config is not trusted")
 // authorizes applying a config's env, so any grant it holds may be forged.
 var ErrUnsafeTrustStore = errors.New("trust store is not secure")
 
+// ErrUnsafePath marks a config whose path stopped being safe after it was
+// approved: a directory above it turned writable, or changed owner.
+var ErrUnsafePath = errors.New("config path is not secure")
+
 // Trust records approvals as sha256(config identity + content), so any edit to
 // an approved config silently revokes the grant. Without this, cd-ing into a
 // cloned repository would apply attacker-controlled env vars (PATH included).
@@ -80,9 +84,9 @@ func trustedOwner(uid int) bool {
 	return uid == os.Getuid() || uid == 0
 }
 
-// checkConfigNode verifies a config file, a resolved symlink target, or either
-// of their parent directories: only a trusted owner may change what sallyport is
-// about to read and approve. Sticky directories are exempt (see below).
+// checkConfigNode is the rule every node on a config's or a store's path is
+// held to: only a trusted owner may change what sallyport is about to read and
+// approve. Sticky directories are exempt (see below).
 func checkConfigNode(path string) error {
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -143,67 +147,46 @@ func verifyTrustStore() (string, error) {
 	if !fi.IsDir() {
 		return "", fmt.Errorf("%s exists but is not a directory; remove it", dir)
 	}
+	// os.Stat followed the link, so the store's own node still has to answer for
+	// itself: whoever owns it, or the directory holding it, chooses which store
+	// the grants are read from.
+	if li, err := os.Lstat(dir); err == nil && li.Mode()&os.ModeSymlink != 0 {
+		if err := checkLinkOwner(dir, li); err != nil {
+			return "", err
+		}
+		if err := checkPath(filepath.Dir(dir)); err != nil {
+			return "", err
+		}
+	}
 	if err := checkOwnerWritable(dir, fi); err != nil {
 		return "", err
 	}
+	if err := checkPath(dir); err != nil {
+		return "", err
+	}
 	return dir, nil
-}
-
-// verifyConfigPath rejects a config an attacker could swap around the moment of
-// approval: the file and its parent directory (a writable parent allows a
-// rename swap even when the file itself is read-only), plus the link node, the
-// resolved target and the target's parent when the config is a symlink.
-//
-// The checks stop at that immediate parent. A writable non-sticky directory
-// higher up lets any user rename away the subtree holding the config and put
-// their own in its place: a grant is sha256(identity + content) and the identity
-// is derived from the path, so a byte-identical copy at the same path still
-// applies, over a tree that is now theirs. Accepted rather than closed —
-// walking to the root would reject legitimate shared project and home trees,
-// whose upper directories are group-writable by policy.
-func verifyConfigPath(path string) error {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return err
-	}
-	li, err := os.Lstat(abs)
-	if err != nil {
-		return err
-	}
-	if li.Mode()&os.ModeSymlink != 0 {
-		if err := checkLinkOwner(abs, li); err != nil {
-			return err
-		}
-		if err := checkConfigNode(filepath.Dir(abs)); err != nil {
-			return err
-		}
-		target, err := filepath.EvalSymlinks(abs)
-		if err != nil {
-			return err
-		}
-		if err := checkConfigNode(target); err != nil {
-			return err
-		}
-		return checkConfigNode(filepath.Dir(target))
-	}
-	if err := checkConfigNode(abs); err != nil {
-		return err
-	}
-	return checkConfigNode(filepath.Dir(abs))
 }
 
 // canonical resolves path aliases (macOS /tmp -> /private/tmp, symlinked
 // checkouts) to one identity: a grant or state recorded through one alias
 // must match accesses through any other.
 func canonical(path string) (string, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return "", err
+	// Made absolute without cleaning: filepath.Abs would cancel "x/.." as text,
+	// and that is only the same thing the kernel does when x is a real
+	// directory. Through a symlink the kernel goes up from wherever the link
+	// landed, so cleaning first names a different node.
+	abs := path
+	if !filepath.IsAbs(abs) {
+		wd, err := os.Getwd()
+		if err != nil {
+			return "", err
+		}
+		abs = wd + string(filepath.Separator) + abs
 	}
 	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
 		return resolved, nil
 	}
-	return abs, nil
+	return filepath.Clean(abs), nil
 }
 
 // configIdentity is the canonical directory a config lives in joined with its
@@ -213,15 +196,18 @@ func canonical(path string) (string, error) {
 // fingerprint. The directory IS resolved, so directory aliases map to one
 // identity.
 func configIdentity(path string) (string, error) {
-	abs, err := filepath.Abs(path)
+	// Split before cleaning, for the reason canonical gives: filepath.Dir would
+	// cancel a ".." that the kernel resolves from somewhere else.
+	name := path
+	parent := "."
+	if i := strings.LastIndex(path, string(filepath.Separator)); i >= 0 {
+		name, parent = path[i+1:], path[:i]
+	}
+	dir, err := canonical(parent)
 	if err != nil {
 		return "", err
 	}
-	dir, err := canonical(filepath.Dir(abs))
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, filepath.Base(abs)), nil
+	return filepath.Join(dir, name), nil
 }
 
 func fingerprint(path string) (string, error) {
@@ -249,15 +235,7 @@ func fingerprintBytes(abs string, content []byte) string {
 // afterwards reads the file twice and reopens the very window LoadTrustedConfig
 // exists to close. It is for inspecting grant state only.
 func IsTrusted(path string) bool {
-	dir, err := verifyTrustStore()
-	if err != nil {
-		return false
-	}
-	fp, err := fingerprint(path)
-	if err != nil {
-		return false
-	}
-	_, err = os.Stat(filepath.Join(dir, fp))
+	_, _, err := LoadTrustedConfig(path)
 	return err == nil
 }
 
@@ -278,13 +256,24 @@ func LoadTrustedConfig(path string) (Config, string, error) {
 	if err != nil {
 		return Config{}, "", err
 	}
+	if err := checkStoreOutsideWorkspace(dir, id); err != nil {
+		return Config{}, "", fmt.Errorf("%w: %v", ErrUnsafeTrustStore, err)
+	}
 	content, err := readConfigFile(id)
 	if err != nil {
 		return Config{}, "", err
 	}
 	fp := fingerprintBytes(id, content)
-	if _, err := os.Stat(filepath.Join(dir, fp)); err != nil {
+	// Only a regular file is a grant. A directory or a symlink with the right
+	// name would otherwise authorize the config while resisting untrust, which
+	// reads records back.
+	if gi, err := os.Lstat(filepath.Join(dir, fp)); err != nil || !gi.Mode().IsRegular() {
 		return Config{}, "", ErrUntrusted
+	}
+	// Approval said the path was safe once; the hook runs on every prompt, and
+	// what was safe then can be writable now.
+	if err := checkConfigTree(id); err != nil {
+		return Config{}, "", fmt.Errorf("%w: %v", ErrUnsafePath, err)
 	}
 	cfg, err := parseConfig(id, content)
 	return cfg, fp, err
@@ -297,12 +286,12 @@ func Trust(path string) error {
 	}
 	// Reject a config someone else could swap between review and approval: the
 	// grant would then vouch for bytes the human never saw.
-	if err := verifyConfigPath(path); err != nil {
+	if err := checkConfigTree(path); err != nil {
 		return fmt.Errorf("refusing to trust: %w", err)
 	}
 	content, err := readConfigFile(id)
 	if err != nil {
-		return err
+		return fmt.Errorf("refusing to trust: %w", err)
 	}
 	fp := fingerprintBytes(id, content)
 	// A grant for unparseable bytes would warn on every cd instead of failing here.
@@ -315,6 +304,9 @@ func Trust(path string) error {
 	if err != nil {
 		return fmt.Errorf("refusing to trust: %w", err)
 	}
+	if err := checkStoreOutsideWorkspace(dir, id); err != nil {
+		return fmt.Errorf("refusing to trust: %w", err)
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
@@ -322,11 +314,23 @@ func Trust(path string) error {
 	// test mere existence, so a crash mid-write must not leave a partial record
 	// behind that would pass as a valid grant.
 	record := filepath.Join(dir, fp)
-	tmp := record + ".tmp"
-	if err := os.WriteFile(tmp, []byte(id+"\n"), 0o600); err != nil {
+	// A name of its own per write, so two shells trusting at once cannot rename
+	// each other's half-written record away; prune sweeps what a crash leaves.
+	tmp, err := os.CreateTemp(dir, fp+".*.tmp")
+	if err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, record); err != nil {
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	if err := tmp.Chmod(0o600); err != nil {
+		return err
+	}
+	if _, err := tmp.WriteString(id + "\n"); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp.Name(), record); err != nil {
 		return err
 	}
 	Ok("trusted %s", id)
@@ -358,7 +362,7 @@ func Untrust(path string) error {
 	}
 	entries, err := listTrustStore(dir)
 	if os.IsNotExist(err) {
-		return fmt.Errorf("not trusted: %s", path)
+		return fmt.Errorf("not trusted: %s", target)
 	}
 	if err != nil {
 		// A permission or I/O error is not proof the grant is absent; a store the
@@ -397,7 +401,7 @@ func Untrust(path string) error {
 		removed++
 	}
 	if removed == 0 {
-		return fmt.Errorf("not trusted: %s", path)
+		return fmt.Errorf("not trusted: %s", target)
 	}
 	Ok("untrusted %s", target)
 	return nil

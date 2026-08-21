@@ -150,9 +150,11 @@ func BuildExportScript(pwd string, quiet bool) (ExportResult, error) {
 	var fp string
 	if root != "" {
 		switch cfg, loadedFP, err := LoadTrustedConfig(ConfigPath(root)); {
-		case errors.Is(err, ErrUnsafeTrustStore):
-			// No grant the store holds can be trusted; treat the workspace as if it
-			// did not exist, with the same gating as the untrusted case below.
+		case errors.Is(err, ErrUnsafeTrustStore), errors.Is(err, ErrUnsafePath):
+			// No grant the store holds can be trusted, or the path the config is
+			// reached through stopped being safe after it was approved. Either
+			// way the workspace is treated as if it did not exist, with the same
+			// gating as the untrusted case below.
 			if !quiet || root == st.Root {
 				warnings = append(warnings, fmt.Sprintf("sallyport: %v; refusing to apply %s", err, ConfigPath(root)))
 			}
