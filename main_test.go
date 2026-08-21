@@ -168,7 +168,8 @@ func TestEverySubcommandIsRegistered(t *testing.T) {
 			t.Errorf("%q is not registered; got %v", name, listed.stdout)
 		}
 	}
-	// The other direction, so the check above cannot pass by never looking.
+	// A name nobody registered has to be refused, or "registered" would mean
+	// nothing.
 	if res := run(t, "help", "nonesuch"); res.code == 0 {
 		t.Errorf("an unknown subcommand reported success: %+v", res)
 	}
