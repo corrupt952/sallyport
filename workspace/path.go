@@ -91,9 +91,6 @@ func checkConfigTree(path string) error {
 	if pathChecksDisabled() {
 		return nil
 	}
-	// The directory is resolved before the name is put back on, so that a ".."
-	// in the path is applied by the kernel from wherever the components really
-	// are. Cancelling it as text checks one file and reads another.
 	node, err := configIdentity(path)
 	if err != nil {
 		return err
@@ -123,9 +120,6 @@ func checkConfigTree(path string) error {
 			return err
 		}
 		if !filepath.IsAbs(target) {
-			// Resolve the link's own directory before appending the target: the
-			// kernel applies a leading ".." to wherever that directory really is,
-			// which is not where cancelling it as text would land.
 			dir, err := canonical(filepath.Dir(node))
 			if err != nil {
 				return err
@@ -139,7 +133,9 @@ func checkConfigTree(path string) error {
 // checkStoreOutsideWorkspace refuses a store kept inside the workspace it
 // authorizes: a grant committed to the repository would approve that
 // repository's config on every machine that checks it out, with nobody
-// approving anything.
+// approving anything. Only the paths that grant or apply ask this; untrust and
+// prune take grants away, and refusing them would leave a shipped grant in
+// place with no way to clear it.
 func checkStoreOutsideWorkspace(storeDir, configPath string) error {
 	if pathChecksDisabled() {
 		return nil

@@ -431,6 +431,13 @@ func TestExportRefusesWhenAnAncestorTurnedWritable(t *testing.T) {
 	if err := Trust(cfg); err != nil {
 		t.Fatal(err)
 	}
+	// Entered first, so the refusal has something to take back: this is the case
+	// that matters, a workspace already applied when its path stops being safe.
+	entered, err := BuildExportScript(filepath.Dir(cfg), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setState(t, stateFromScript(t, entered.Script))
 	chmodMode(t, levels[0], 0o777)
 
 	res, err := BuildExportScript(filepath.Dir(cfg), false)
@@ -442,6 +449,21 @@ func TestExportRefusesWhenAnAncestorTurnedWritable(t *testing.T) {
 	}
 	if !hasWarning(res.Warnings, filepath.Dir(cfg)) && !hasWarning(res.Warnings, levels[0]) {
 		t.Errorf("got warnings %q, want one naming the workspace or %s", res.Warnings, levels[0])
+	}
+	// A path that stopped being safe has to leave the shell as if there were no
+	// workspace here at all. Recorded as entered instead, the shell believes it
+	// is inside a workspace sallyport just refused to apply, and leaving never
+	// restores anything because there is nothing recorded as applied.
+	if !strings.Contains(res.Script, stateShellVar+"=''") {
+		t.Errorf("state root = %q, want the state cleared: a refused workspace must not be recorded as entered",
+			stateFromScript(t, res.Script).Root)
+	}
+	// "broken" would send the user to the config file, which is fine; what
+	// changed is the directory above it.
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "ignoring broken") {
+			t.Errorf("warning blames the config file: %q", w)
+		}
 	}
 }
 
