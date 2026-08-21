@@ -62,9 +62,8 @@ func newHome(t *testing.T) (dir, home string) {
 	return dir, home
 }
 
-// runIn starts this binary as sallyport in dir. stdout and stderr are captured
-// separately: which stream a command writes to is the thing under test, since
-// the hook evals whatever reaches stdout.
+// runIn captures stdout and stderr separately because which stream a command
+// writes to is the thing under test: the hook evals whatever reaches stdout.
 func runIn(t *testing.T, dir, home string, args ...string) result {
 	t.Helper()
 	self, err := os.Executable()
@@ -123,10 +122,10 @@ func trustedWorkspace(t *testing.T) (dir, home string) {
 	return dir, home
 }
 
-// The ExitStatus each command returns has to become the process's exit
-// code. Replacing the conversion with a constant zero leaves every in-process
-// test green, and a shell function that checks `sallyport trust` would believe
-// a refusal succeeded.
+// The ExitStatus each command returns has to become the process's exit code.
+// Replacing the conversion with a constant zero leaves every in-process test
+// green, and a shell function checking `sallyport trust` would take a refusal
+// for a success.
 func TestExitStatusReachesTheProcess(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -154,9 +153,8 @@ func TestExitStatusReachesTheProcess(t *testing.T) {
 // can see.
 func TestEverySubcommandIsRegistered(t *testing.T) {
 	t.Parallel()
-	// One process for the whole list rather than one per name: the answer is a
-	// list, and starting the binary nine times to read nine lines of it costs
-	// most of this file's runtime under -race.
+	// One process for the whole list: starting the binary once per name is most
+	// of this file's runtime under -race.
 	listed := run(t, "commands")
 	if listed.code != 0 {
 		t.Fatalf("commands exited %d: %s", listed.code, listed.stderr)
@@ -176,9 +174,8 @@ func TestEverySubcommandIsRegistered(t *testing.T) {
 	}
 }
 
-// `eval "$(sallyport hook zsh)"` is how sallyport is
-// installed. The shim has to arrive on stdout, whole, with nothing on stderr
-// for the shell to swallow into the eval.
+// `eval "$(sallyport hook zsh)"` is how sallyport is installed, so the shim has
+// to arrive on stdout, whole, with nothing on stderr for the eval to swallow.
 func TestHookWritesTheShimToStdoutOnly(t *testing.T) {
 	t.Parallel()
 	res := run(t, "hook", "zsh")
@@ -195,9 +192,9 @@ func TestHookWritesTheShimToStdoutOnly(t *testing.T) {
 	}
 }
 
-// The export script goes to stdout for the same reason, and a warning
-// on stdout would be eval'd as a command. Run from a workspace, since a
-// directory with no config has nothing to say and would pass either way.
+// The export script goes to stdout for the same reason, and a warning there
+// would be eval'd as a command. Run from a workspace, since a directory with no
+// config has nothing to say and would pass either way.
 func TestExportWritesTheScriptToStdoutAndWarningsToStderr(t *testing.T) {
 	t.Parallel()
 	dir, home := trustedWorkspace(t)
@@ -227,9 +224,8 @@ func TestExportWritesTheScriptToStdoutAndWarningsToStderr(t *testing.T) {
 	}
 }
 
-// The installed shim passes -quiet on every prompt. A renamed flag
-// turns each prompt into an error, and an ignored one puts a warning on every
-// one of them.
+// The installed shim passes -quiet on every prompt. A renamed flag turns each
+// prompt into an error, and an ignored one puts a warning on every one.
 func TestQuietIsAcceptedAndObeyed(t *testing.T) {
 	t.Parallel()
 	dir, home := newHome(t)
@@ -252,9 +248,9 @@ func TestQuietIsAcceptedAndObeyed(t *testing.T) {
 	}
 }
 
-// The two commands that report what they did, rather than
-// answering a question. Nothing held their success paths, so "always fails" and
-// "succeeds with a usage error" both passed.
+// The two commands that report what they did rather than answering a question.
+// Nothing held their success paths, so "always fails" and "succeeds with a
+// usage error" both passed.
 func TestCreateAndPruneSucceedAndSayWhatHappened(t *testing.T) {
 	t.Parallel()
 	dir, home := newHome(t)
@@ -265,8 +261,10 @@ func TestCreateAndPruneSucceedAndSayWhatHappened(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, ".sallyport.jsonc")); err != nil {
 		t.Fatalf("create reported success without writing a config: %v", err)
 	}
-	if created.stdout == "" && created.stderr == "" {
-		t.Error("create said nothing about what it wrote")
+	// Named, because create ends by calling trust, whose own confirmation would
+	// otherwise satisfy any test that only asks whether something was said.
+	if !strings.Contains(created.stdout, "created") {
+		t.Errorf("create did not say what it wrote:\nstdout: %q\nstderr: %q", created.stdout, created.stderr)
 	}
 
 	pruned := runIn(t, dir, home, "prune")
@@ -278,16 +276,34 @@ func TestCreateAndPruneSucceedAndSayWhatHappened(t *testing.T) {
 	}
 }
 
-// The usage a user sees has to stay off stdout: for export and hook that stream
-// is eval'd, so usage text arriving there is executed.
+// Usage has to stay off stdout: for export and hook that stream is eval'd, so
+// text arriving there is executed rather than read.
 func TestUsageGoesToStderr(t *testing.T) {
 	t.Parallel()
-	res := run(t, "hook", "bash")
-	if res.stderr == "" {
-		t.Error("a usage error printed nothing to stderr")
-	}
-	if strings.Contains(res.stdout, "Usage") {
-		t.Errorf("usage reached stdout, where the shell would eval it:\n%s", res.stdout)
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		// A command's own usage, and the top-level usage the Commander renders
+		// for a name it does not know -- which is the one no in-process test can
+		// see, since the Commander holds the streams it captured in init().
+		{"a bad argument", []string{"hook", "bash"}},
+		{"a bad argument to the command whose stdout is eval'd", []string{"export", "bash"}},
+		{"an argument to a command that takes none", []string{"create", "extra"}},
+		{"an unknown subcommand", []string{"nonesuch"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			res := run(t, tc.args...)
+			if res.stderr == "" {
+				t.Error("a usage error printed nothing to stderr")
+			}
+			// Emptiness rather than a phrase: the wording is not pinned here, and
+			// looking for one would make this pass whenever the wording changed.
+			if res.stdout != "" {
+				t.Errorf("usage reached stdout, where the shell would eval it:\n%s", res.stdout)
+			}
+		})
 	}
 }
 
