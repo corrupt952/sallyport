@@ -597,9 +597,10 @@ func TestTrustResolvesARelativeSymlinkTargetAgainstTheLink(t *testing.T) {
 	mkdirMode(t, ws, 0o755)
 	real := filepath.Join(home, "real")
 	mkdirMode(t, real, 0o755)
-	if err := os.WriteFile(filepath.Join(real, "x.jsonc"), []byte(pathCheckConfig), 0o666); err != nil {
+	if err := os.WriteFile(filepath.Join(real, "x.jsonc"), []byte(pathCheckConfig), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	chmodMode(t, filepath.Join(real, "x.jsonc"), 0o666)
 	// The decoy sits where "../real/x.jsonc" lands when it is resolved against
 	// the working directory instead, and is perfectly safe.
 	decoy := filepath.Join(home, "work", "real")
@@ -641,7 +642,9 @@ func TestTrustFollowsDotDotThroughASymlinkTheWayTheKernelDoes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg := filepath.Join(home, "a", "b", "..", "e", "x.jsonc")
+	// Concatenated rather than composed with filepath.Join, which would cancel
+	// the ".." before anything under test sees it.
+	cfg := home + "/a/b/../e/x.jsonc"
 	assertRefusedNaming(t, Trust(cfg), unsafeDir)
 }
 
@@ -934,9 +937,10 @@ func TestTrustChecksTheSameNodeItReads(t *testing.T) {
 	realParent := filepath.Join(home, "deep")
 	unsafe := filepath.Join(realParent, "proj")
 	mkdirMode(t, unsafe, 0o755)
-	if err := os.WriteFile(ConfigPath(unsafe), []byte(pathCheckConfig), 0o666); err != nil {
+	if err := os.WriteFile(ConfigPath(unsafe), []byte(pathCheckConfig), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	chmodMode(t, ConfigPath(unsafe), 0o666)
 	// Where the lexical reading of "b/.." lands: a safe file the user would be
 	// happy to approve.
 	decoy := filepath.Join(home, "proj")
@@ -947,7 +951,9 @@ func TestTrustChecksTheSameNodeItReads(t *testing.T) {
 	}
 	mkdirMode(t, filepath.Join(realParent, "real"), 0o755)
 
-	cfg := filepath.Join(home, "b", "..", "proj", ConfigFileName)
+	// Concatenated rather than composed with filepath.Join, which would cancel
+	// the ".." before anything under test sees it.
+	cfg := home + "/b/../proj/" + ConfigFileName
 	assertRefusedNaming(t, Trust(cfg), ConfigPath(unsafe))
 	if IsTrusted(cfg) {
 		t.Error("the world-writable config the path really names is reported trusted")
@@ -995,7 +1001,7 @@ func TestTrustAcceptsDotDotThroughRealDirectories(t *testing.T) {
 	cfg := newWorkspaceAt(t, ws)
 	mkdirMode(t, filepath.Join(home, "sibling"), 0o755)
 
-	viaDotDot := filepath.Join(home, "sibling", "..", "ws", ConfigFileName)
+	viaDotDot := home + "/sibling/../ws/" + ConfigFileName
 	if err := Trust(viaDotDot); err != nil {
 		t.Fatalf("refused a config named through a real \"..\": %v", err)
 	}

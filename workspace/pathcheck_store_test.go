@@ -910,14 +910,15 @@ func TestTrustNeverGrantsBytesThatSkippedTheChecks(t *testing.T) {
 	const swapped = `{"env": {"FOO": "theirs"}}`
 
 	var once sync.Once
-	readConfigBytes = func(path string) ([]byte, error) {
+	openConfigFile = func(path string) (*os.File, error) {
+		f, err := os.Open(path)
 		once.Do(func() { swapConfig(t, cfg, swapped, 0o666) })
-		return os.ReadFile(path)
+		return f, err
 	}
-	t.Cleanup(func() { readConfigBytes = os.ReadFile })
+	t.Cleanup(func() { openConfigFile = openConfigFileDefault })
 
 	err := Trust(cfg)
-	readConfigBytes = os.ReadFile
+	openConfigFile = openConfigFileDefault
 	id, idErr := configIdentity(cfg)
 	if idErr != nil {
 		t.Fatal(idErr)
@@ -938,16 +939,16 @@ func TestLoadTrustedConfigReadsTheConfigOnce(t *testing.T) {
 	}
 
 	reads := 0
-	readConfigBytes = func(path string) ([]byte, error) {
+	openConfigFile = func(path string) (*os.File, error) {
 		reads++
-		return os.ReadFile(path)
+		return openConfigFileDefault(path)
 	}
-	t.Cleanup(func() { readConfigBytes = os.ReadFile })
+	t.Cleanup(func() { openConfigFile = openConfigFileDefault })
 
 	if _, _, err := LoadTrustedConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
-	readConfigBytes = os.ReadFile
+	openConfigFile = openConfigFileDefault
 	if reads != 1 {
 		t.Errorf("LoadTrustedConfig read the config %d times, want exactly 1", reads)
 	}
@@ -994,16 +995,16 @@ func TestConfigReadDoesNotBlockWhenTheFileTurnsIntoAFifo(t *testing.T) {
 	}
 
 	var once sync.Once
-	readConfigBytes = func(path string) ([]byte, error) {
+	openConfigFile = func(path string) (*os.File, error) {
 		once.Do(func() {
 			if err := os.Remove(cfg); err != nil {
 				return
 			}
 			_ = syscall.Mkfifo(cfg, 0o644)
 		})
-		return os.ReadFile(path)
+		return openConfigFileDefault(path)
 	}
-	t.Cleanup(func() { readConfigBytes = os.ReadFile })
+	t.Cleanup(func() { openConfigFile = openConfigFileDefault })
 
 	done := make(chan struct{})
 	go func() {
@@ -1021,7 +1022,7 @@ func TestConfigReadDoesNotBlockWhenTheFileTurnsIntoAFifo(t *testing.T) {
 		<-done
 		t.Error("the read blocked on a fifo swapped in for the config; the prompt hangs here")
 	}
-	readConfigBytes = os.ReadFile
+	openConfigFile = openConfigFileDefault
 }
 
 // A-85: the size limit exists to bound what every prompt pays. Deciding it from
@@ -1032,14 +1033,14 @@ func TestConfigReadStopsAtTheSizeLimitWhenTheFileGrows(t *testing.T) {
 	cfg := newWorkspaceAt(t, ws)
 
 	var once sync.Once
-	readConfigBytes = func(path string) ([]byte, error) {
+	openConfigFile = func(path string) (*os.File, error) {
 		once.Do(func() { writeConfigOfSize(t, ws, maxConfigSize+1) })
-		return os.ReadFile(path)
+		return openConfigFileDefault(path)
 	}
-	t.Cleanup(func() { readConfigBytes = os.ReadFile })
+	t.Cleanup(func() { openConfigFile = openConfigFileDefault })
 
 	_, err := LoadConfig(cfg)
-	readConfigBytes = os.ReadFile
+	openConfigFile = openConfigFileDefault
 	if err == nil {
 		t.Error("a config that grew past the limit inside the read window was accepted whole")
 	}
@@ -1194,12 +1195,6 @@ func TestGroupWritableLayoutsAreRefusedWithAFix(t *testing.T) {
 		})
 	}
 }
-
-// pathCheckOptOut is the environment variable that turns the path checks off.
-// Every comparable tool has one (StrictModes no, safe.directory,
-// sudoedit_checkdir, exrc), and without it the refusals above have no answer for
-// a shared tree the user cannot chmod.
-const pathCheckOptOut = "SALLYPORT_NO_PATH_CHECK"
 
 // A-90: the escape hatch the refusal points at has to exist.
 func TestPathCheckOptOutApprovesARefusedLayout(t *testing.T) {

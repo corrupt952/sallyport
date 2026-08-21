@@ -4,10 +4,12 @@ package workspace
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"syscall"
 
 	"github.com/tailscale/hujson"
 )
@@ -66,21 +68,47 @@ func ConfigPath(root string) string { return filepath.Join(root, ConfigFileName)
 // loudly instead of slowing every prompt.
 const maxConfigSize = 1 << 20
 
-// readConfigBytes is a variable so tests can act inside the window between the
-// size check and the read it guards, which is where anything swapped in behind
-// sallyport's back lands: the file growing past the limit, turning into a fifo,
-// or becoming content the path checks never saw.
-var readConfigBytes = os.ReadFile
+// openConfigFile is a variable so tests can act inside the window between the
+// open and the checks that follow it, which is where anything swapped in behind
+// sallyport's back lands.
+var openConfigFile = openConfigFileDefault
 
+// O_NONBLOCK so a fifo left where the config was answers instead of holding the
+// prompt open forever; readConfigFile rejects the kind either way.
+func openConfigFileDefault(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+}
+
+// readConfigFile opens the config once and answers every question from that one
+// descriptor: what it is, how large it is, and what it holds. Asking the path
+// again between the checks and the read would let the answers describe
+// different files.
 func readConfigFile(path string) ([]byte, error) {
-	fi, err := os.Stat(path)
+	f, err := openConfigFile(path)
 	if err != nil {
 		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
 	}
 	if fi.Size() > maxConfigSize {
 		return nil, fmt.Errorf("%s: exceeds %d bytes", path, maxConfigSize)
 	}
-	return readConfigBytes(path)
+	// One byte past the limit, so a file that grew after the size above was read
+	// is refused rather than truncated into something that parses.
+	data, err := io.ReadAll(io.LimitReader(f, maxConfigSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxConfigSize {
+		return nil, fmt.Errorf("%s: exceeds %d bytes", path, maxConfigSize)
+	}
+	return data, nil
 }
 
 func LoadConfig(path string) (Config, error) {
