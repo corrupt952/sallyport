@@ -106,7 +106,7 @@ A grant is `sha256(config path + contents)`, so editing an approved config revok
 Two limits are worth knowing:
 
 - **ACLs are not read.** On macOS a directory shared through Finder or `chmod +a` still reports `drwxr-xr-x`, and sallyport sees only those mode bits. sudo is the one comparable tool that reads ACLs, and it does so by dropping privileges and calling `faccessat(AT_EACCESS)`, which an unprivileged program cannot do; sudo itself falls back to mode bits where that call is unavailable.
-- **The checks stop at your home directory.** Whoever can write above it can replace the shell rc that loads sallyport, so refusing there would protect nothing while rejecting the group-writable homes several distributions create by default. This is what OpenSSH's `StrictModes` does.
+- **The checks stop at your home directory**, which is taken from `$HOME`. Whoever can write above it can replace the shell rc that loads sallyport, so refusing there would protect nothing while rejecting the group-writable homes several distributions create by default — this is what OpenSSH's `StrictModes` does. Reading it from the environment makes it a convenience boundary rather than a security one: anyone able to set `$HOME` can move it, but they can already edit the shell rc, so nothing is lost. Where `$HOME` names nothing that exists, no boundary can be established and the checks run to the filesystem root, which is also what OpenSSH does when it cannot resolve the home.
 
 Set `SALLYPORT_NO_PATH_CHECK=1` to skip the path checks entirely, for a shared tree whose permissions you cannot change.
 
