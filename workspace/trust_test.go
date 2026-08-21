@@ -339,7 +339,8 @@ func TestLoadTrustedConfig(t *testing.T) {
 // at once, silently, on upgrade. Both are one-token edits.
 func TestFingerprintIsAFullSHA256(t *testing.T) {
 	const path = "/ws/.sallyport.jsonc"
-	got := fingerprintBytes(path, []byte(`{"env": {}}`))
+	const content = `{"env": {}}`
+	got := fingerprintBytes(path, []byte(content))
 
 	if len(got) != sha256.Size*2 {
 		t.Errorf("fingerprint is %d hex chars, want %d: a shorter name collides sooner", len(got), sha256.Size*2)
@@ -347,7 +348,7 @@ func TestFingerprintIsAFullSHA256(t *testing.T) {
 	if _, err := hex.DecodeString(got); err != nil {
 		t.Errorf("fingerprint %q is not hex: %v", got, err)
 	}
-	want := sha256.Sum256(append([]byte(path+"\x00"), []byte(`{"env": {}}`)...))
+	want := sha256.Sum256([]byte(path + "\x00" + content))
 	if got != hex.EncodeToString(want[:]) {
 		t.Errorf("fingerprint = %q, want %q: the digest is what every grant on disk is named by", got, hex.EncodeToString(want[:]))
 	}
