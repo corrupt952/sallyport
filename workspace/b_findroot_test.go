@@ -242,6 +242,25 @@ func TestFindRootCrossesMountBoundaries(t *testing.T) {
 
 // B-63: Nix and home-manager deploy the config as a symlink into a read-only
 // store, so the link has to mark the workspace the same way a plain file does.
+// Y8: the search asks for the name and the kind, never the size. An empty file
+// is a workspace whose config fails to parse, which is a thing to report; taken
+// as no workspace at all, the config above it applies here instead.
+func TestFindRootAcceptsAnEmptyConfig(t *testing.T) {
+	base := bIsolatedTree(t)
+	outer := filepath.Join(base, "outer")
+	inner := filepath.Join(outer, "inner")
+	if err := os.MkdirAll(inner, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeConfig(t, outer, `{"env": {"FROM": "outer"}}`)
+	if err := os.WriteFile(ConfigPath(inner), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := FindRoot(inner); got != inner {
+		t.Errorf("FindRoot = %q, want %q: an empty config still marks its own workspace", got, inner)
+	}
+}
+
 func TestFindRootAcceptsSymlinkedConfig(t *testing.T) {
 	base := bIsolatedTree(t)
 	store := filepath.Join(base, "store")
