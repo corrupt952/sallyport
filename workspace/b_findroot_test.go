@@ -156,8 +156,10 @@ func TestFindRootResolvesDotDotThroughSymlinks(t *testing.T) {
 	// leads into real/sub, and the kernel reads link/.. as real, where Clean
 	// reads it as base.
 	starts := map[string]string{
-		"through the link":        link,
-		"through the link and up": filepath.Join(link, ".."),
+		"through the link": link,
+		// Concatenated, since filepath.Join would cancel the ".." before
+		// FindRoot ever sees it.
+		"through the link and up": link + "/..",
 	}
 	for name, start := range starts {
 		t.Run(name, func(t *testing.T) {

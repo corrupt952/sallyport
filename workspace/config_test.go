@@ -249,7 +249,12 @@ func TestLoadConfigRejectsBrokenSyntax(t *testing.T) {
 }
 
 func TestFindRoot(t *testing.T) {
-	base := t.TempDir()
+	// Resolved because FindRoot answers with the directories the kernel names,
+	// and t.TempDir hands back an alias on macOS.
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	root := filepath.Join(base, "demo")
 	nested := filepath.Join(root, "repo", "sub")
 	if err := os.MkdirAll(nested, 0o755); err != nil {
@@ -271,7 +276,10 @@ func TestFindRoot(t *testing.T) {
 // A .sallyport.jsonc symlinked to a regular file marks a workspace: Nix and
 // home-manager deploy configs as symlinks into a read-only store.
 func TestFindRootFollowsSymlinkToRegularFile(t *testing.T) {
-	base := t.TempDir()
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	regRoot := filepath.Join(base, "regular")
 	if err := os.MkdirAll(regRoot, 0o755); err != nil {

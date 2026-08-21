@@ -291,7 +291,7 @@ func Trust(path string) error {
 	}
 	content, err := readConfigFile(id)
 	if err != nil {
-		return err
+		return fmt.Errorf("refusing to trust: %w", err)
 	}
 	fp := fingerprintBytes(id, content)
 	// A grant for unparseable bytes would warn on every cd instead of failing here.
@@ -362,7 +362,7 @@ func Untrust(path string) error {
 	}
 	entries, err := listTrustStore(dir)
 	if os.IsNotExist(err) {
-		return fmt.Errorf("not trusted: %s", path)
+		return fmt.Errorf("not trusted: %s", target)
 	}
 	if err != nil {
 		// A permission or I/O error is not proof the grant is absent; a store the
@@ -401,7 +401,7 @@ func Untrust(path string) error {
 		removed++
 	}
 	if removed == 0 {
-		return fmt.Errorf("not trusted: %s", path)
+		return fmt.Errorf("not trusted: %s", target)
 	}
 	Ok("untrusted %s", target)
 	return nil

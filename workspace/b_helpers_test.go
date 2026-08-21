@@ -102,6 +102,13 @@ func bWantZshParses(t *testing.T, zsh, script string) {
 func bIsolatedTree(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	bRequireNoAncestorConfig(t, dir)
-	return dir
+	// t.TempDir hands back an alias on macOS (/tmp is a link to /private/tmp).
+	// Resolving it here keeps the expectations in one spelling; a test comparing
+	// against the alias would fail on the name rather than on the answer.
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bRequireNoAncestorConfig(t, resolved)
+	return resolved
 }

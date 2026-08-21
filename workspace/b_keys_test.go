@@ -249,16 +249,19 @@ func TestParseConfigDuplicateEnvKeyTakesTheLast(t *testing.T) {
 	}
 }
 
-// B-15: same rule one level up, for a repeated "env" object. Pinned as it
-// behaves, not as it might read: encoding/json decodes the second object into
-// the map the first one produced, so entries merge rather than replace.
-func TestParseConfigDuplicateEnvObjectMergesWithLastKeyWinning(t *testing.T) {
+// B-15: same rule one level up, for a repeated "env" object. The last one
+// replaces the first rather than merging into it, which is what decoding a
+// member at a time gives and the same answer a duplicate key inside env gets.
+func TestParseConfigDuplicateEnvObjectTakesTheLastOne(t *testing.T) {
 	cfg, err := bParse(`{"env": {"A": "1"}, "env": {"B": "2"}}`)
 	if err != nil {
 		t.Fatalf("duplicate env object rejected: %v", err)
 	}
-	if cfg.Env["A"] != "1" || cfg.Env["B"] != "2" {
-		t.Errorf("env = %v, want both entries merged", cfg.Env)
+	if _, ok := cfg.Env["A"]; ok {
+		t.Errorf("env = %v, want only the last object's entries", cfg.Env)
+	}
+	if cfg.Env["B"] != "2" {
+		t.Errorf("B = %q, want the last object to win", cfg.Env["B"])
 	}
 
 	cfg, err = bParse(`{"env": {"A": "1"}, "env": {"A": "2"}}`)
