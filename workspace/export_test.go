@@ -851,6 +851,58 @@ func TestExportUnsafeTrustStoreWarningGating(t *testing.T) {
 	}
 }
 
+// A store the user cannot read is not a config the user has not approved. The
+// hook says which one on every prompt, and "run sallyport trust" is advice that
+// cannot work when the answer is a chmod.
+func TestExportUnreadableStoreDoesNotReadAsUntrusted(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses ownership and permission checks")
+	}
+	root := newWorkspaceDir(t, `{"env": {"OP_ACCOUNT": "x"}}`)
+	store, err := trustDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Entered first, so the refusal has something to take back: a workspace
+	// already applied when its store stops being readable.
+	t.Setenv(stateEnvKey, "")
+	entered, err := BuildExportScript(root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setState(t, stateFromScript(t, entered.Script))
+	if err := os.Chmod(store, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(store, 0o700) })
+
+	res, err := BuildExportScript(root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(res.Script, "OP_ACCOUNT='x'") {
+		t.Errorf("workspace applied from a store that could not be read:\n%s", res.Script)
+	}
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "is not trusted") {
+			t.Errorf("warning sends the user to `sallyport trust`, which cannot fix a permission: %q", w)
+		}
+		// The config is fine; the store it was approved in cannot be read.
+		if strings.Contains(w, "ignoring broken") {
+			t.Errorf("warning blames the config file: %q", w)
+		}
+	}
+	if !hasWarning(res.Warnings, store) {
+		t.Errorf("got warnings %v, want one naming %s", res.Warnings, store)
+	}
+	// Nothing here can be applied, so the workspace has to be left as if it were
+	// not there. Recorded as entered, the shell keeps whatever the previous one
+	// applied and the state says the user is somewhere they are not.
+	if !strings.Contains(res.Script, stateShellVar+"=''") {
+		t.Errorf("the refused workspace was recorded as entered:\n%s", res.Script)
+	}
+}
+
 func TestExportBrokenConfigWarningGating(t *testing.T) {
 	root := newUntrustedWorkspaceDir(t, `{"env": {"$(whoami)": "x"}}`)
 	forgeGrant(t, root)
