@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // quoteJSON emits a JSON string literal. It has to be a real JSON encoder:
@@ -198,20 +199,27 @@ func TestReadConfigFileEnforcesSizeLimit(t *testing.T) {
 	})
 
 	t.Run("without reading the file", func(t *testing.T) {
-		if os.Geteuid() == 0 {
-			t.Skip("running as root: file permissions are not enforced")
-		}
-		if err := os.Chmod(path, 0o000); err != nil {
+		// The size is answered from the descriptor's own stat, so a file far
+		// larger than the limit costs an open and nothing more. Reading it to
+		// find out would be the whole cost the limit exists to avoid.
+		big := t.TempDir()
+		huge := ConfigPath(big)
+		f, err := os.Create(huge)
+		if err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() {
-			if err := os.Chmod(path, 0o644); err != nil {
-				t.Error(err)
-			}
-		})
-		// Reading first would surface a permission error instead.
-		_, err := readConfigFile(path)
+		if err := f.Truncate(1 << 30); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		start := time.Now()
+		_, err = readConfigFile(huge)
 		wantRefusal(t, err)
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Errorf("refusing a 1 GiB config took %v; the limit is meant to be answered without reading", elapsed)
+		}
 	})
 }
 
