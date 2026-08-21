@@ -1,6 +1,8 @@
 package workspace
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io/fs"
 	"os"
@@ -327,6 +329,34 @@ func TestLoadTrustedConfig(t *testing.T) {
 	writeConfig(t, filepath.Dir(path), `{"env": {"ADDED": "later"}}`)
 	if _, _, err := LoadTrustedConfig(path); !errors.Is(err, ErrUntrusted) {
 		t.Fatalf("edited config: got %v, want ErrUntrusted", err)
+	}
+}
+
+// A grant is a file named after the fingerprint, and its existence is the whole
+// approval, so the name has to be as hard to arrive at by accident as the
+// digest that produces it. Shortening it invites a collision that authorizes a
+// config nobody approved; changing the digest invalidates every grant on disk
+// at once, silently, on upgrade. Both are one-token edits.
+func TestFingerprintIsAFullSHA256(t *testing.T) {
+	const path = "/ws/.sallyport.jsonc"
+	const content = `{"env": {}}`
+	got := fingerprintBytes(path, []byte(content))
+
+	if len(got) != sha256.Size*2 {
+		t.Errorf("fingerprint is %d hex chars, want %d: a shorter name collides sooner, and a different digest orphans every grant on disk", len(got), sha256.Size*2)
+	}
+	if _, err := hex.DecodeString(got); err != nil {
+		t.Errorf("fingerprint %q is not hex: %v", got, err)
+	}
+	want := sha256.Sum256([]byte(path + "\x00" + content))
+	if got != hex.EncodeToString(want[:]) {
+		t.Errorf("fingerprint = %q, want %q: the digest is what every grant on disk is named by", got, hex.EncodeToString(want[:]))
+	}
+
+	// The separator is what keeps a path ending in one config's bytes from
+	// hashing the same as a shorter path ending in another's.
+	if a, b := fingerprintBytes("/a", []byte("b")), fingerprintBytes("/ab", nil); a == b {
+		t.Error("path and content run together, so different pairs share a grant")
 	}
 }
 
