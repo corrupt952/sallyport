@@ -76,7 +76,7 @@ func runIn(t *testing.T, dir, home string, args ...string) result {
 	cmd := exec.CommandContext(ctx, self, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	cmd.Env = append(os.Environ(), reentryKey+"=1", "HOME="+home, "XDG_DATA_HOME="+home+"/data")
+	cmd.Env = append(cleanEnv(), reentryKey+"=1", "HOME="+home, "XDG_DATA_HOME="+filepath.Join(home, "data"))
 	cmd.Dir = dir
 	cmd.WaitDelay = 5 * time.Second
 
@@ -89,6 +89,21 @@ func runIn(t *testing.T, dir, home string, args ...string) result {
 		t.Fatalf("sallyport %v: %v", args, err)
 	}
 	return result{stdout.String(), stderr.String(), cmd.ProcessState.ExitCode()}
+}
+
+// cleanEnv is the environment minus the two variables sallyport reads for
+// itself. Inherited from whoever ran the tests, a stale state blob or an opt-out
+// left over from debugging changes what the child does; testenv.CleanCmdEnv
+// drops GODEBUG and GOTRACEBACK from GOROOT's exec tests for the same reason.
+func cleanEnv() []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "__SALLYPORT_STATE=") || strings.HasPrefix(kv, "SALLYPORT_NO_PATH_CHECK=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return env
 }
 
 func writeWorkspace(t *testing.T, dir string) {
@@ -108,11 +123,12 @@ func trustedWorkspace(t *testing.T) (dir, home string) {
 	return dir, home
 }
 
-// D01: the ExitStatus each command returns has to become the process's exit
+// The ExitStatus each command returns has to become the process's exit
 // code. Replacing the conversion with a constant zero leaves every in-process
 // test green, and a shell function that checks `sallyport trust` would believe
 // a refusal succeeded.
 func TestExitStatusReachesTheProcess(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		args []string
@@ -125,6 +141,7 @@ func TestExitStatusReachesTheProcess(t *testing.T) {
 		{"an unknown subcommand is a usage error", []string{"nonesuch"}, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			if got := run(t, tc.args...).code; got != tc.want {
 				t.Errorf("exit code = %d, want %d", got, tc.want)
 			}
@@ -132,10 +149,11 @@ func TestExitStatusReachesTheProcess(t *testing.T) {
 	}
 }
 
-// D02: a command that is not registered cannot be reached, and the in-process
+// A command that is not registered cannot be reached, and the in-process
 // tests call Execute directly, so dropping a Register line breaks nothing they
 // can see.
 func TestEverySubcommandIsRegistered(t *testing.T) {
+	t.Parallel()
 	// One process for the whole list rather than one per name: the answer is a
 	// list, and starting the binary nine times to read nine lines of it costs
 	// most of this file's runtime under -race.
@@ -158,10 +176,11 @@ func TestEverySubcommandIsRegistered(t *testing.T) {
 	}
 }
 
-// C61/C62/D25/E01: `eval "$(sallyport hook zsh)"` is how sallyport is
+// `eval "$(sallyport hook zsh)"` is how sallyport is
 // installed. The shim has to arrive on stdout, whole, with nothing on stderr
 // for the shell to swallow into the eval.
 func TestHookWritesTheShimToStdoutOnly(t *testing.T) {
+	t.Parallel()
 	res := run(t, "hook", "zsh")
 	if res.code != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr: %s)", res.code, res.stderr)
@@ -176,10 +195,11 @@ func TestHookWritesTheShimToStdoutOnly(t *testing.T) {
 	}
 }
 
-// C51/C52: the export script goes to stdout for the same reason, and a warning
+// The export script goes to stdout for the same reason, and a warning
 // on stdout would be eval'd as a command. Run from a workspace, since a
 // directory with no config has nothing to say and would pass either way.
 func TestExportWritesTheScriptToStdoutAndWarningsToStderr(t *testing.T) {
+	t.Parallel()
 	dir, home := trustedWorkspace(t)
 	res := runIn(t, dir, home, "export", "zsh")
 	if res.code != 0 {
@@ -207,10 +227,11 @@ func TestExportWritesTheScriptToStdoutAndWarningsToStderr(t *testing.T) {
 	}
 }
 
-// C54/C55: the installed shim passes -quiet on every prompt. A renamed flag
+// The installed shim passes -quiet on every prompt. A renamed flag
 // turns each prompt into an error, and an ignored one puts a warning on every
 // one of them.
 func TestQuietIsAcceptedAndObeyed(t *testing.T) {
+	t.Parallel()
 	dir, home := newHome(t)
 	writeWorkspace(t, dir)
 
@@ -231,10 +252,11 @@ func TestQuietIsAcceptedAndObeyed(t *testing.T) {
 	}
 }
 
-// E03/E04/C44/C38: the two commands that report what they did, rather than
+// The two commands that report what they did, rather than
 // answering a question. Nothing held their success paths, so "always fails" and
 // "succeeds with a usage error" both passed.
 func TestCreateAndPruneSucceedAndSayWhatHappened(t *testing.T) {
+	t.Parallel()
 	dir, home := newHome(t)
 	created := runIn(t, dir, home, "create")
 	if created.code != 0 {
@@ -259,6 +281,7 @@ func TestCreateAndPruneSucceedAndSayWhatHappened(t *testing.T) {
 // The usage a user sees has to stay off stdout: for export and hook that stream
 // is eval'd, so usage text arriving there is executed.
 func TestUsageGoesToStderr(t *testing.T) {
+	t.Parallel()
 	res := run(t, "hook", "bash")
 	if res.stderr == "" {
 		t.Error("a usage error printed nothing to stderr")
@@ -272,6 +295,7 @@ func TestUsageGoesToStderr(t *testing.T) {
 // init output the same way; the CI installs zsh for the tests that already do
 // this in the workspace package.
 func TestTheShimLoadsInARealZsh(t *testing.T) {
+	t.Parallel()
 	zsh, err := exec.LookPath("zsh")
 	if err != nil {
 		t.Skip("zsh not available")
@@ -282,9 +306,10 @@ func TestTheShimLoadsInARealZsh(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	dir, home := newHome(t)
 	cmd := exec.CommandContext(ctx, zsh, "-f")
-	cmd.Dir = t.TempDir()
-	cmd.Env = append(os.Environ(), reentryKey+"=1", "HOME="+t.TempDir())
+	cmd.Dir = dir
+	cmd.Env = append(cleanEnv(), reentryKey+"=1", "HOME="+home)
 	cmd.Stdin = strings.NewReader(`eval "$(` + self + ` hook zsh)"` + "\nprint READY\n")
 	cmd.WaitDelay = 5 * time.Second
 
