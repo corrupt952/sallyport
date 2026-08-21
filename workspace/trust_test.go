@@ -135,6 +135,37 @@ func TestUntrustReportsUnlistableStore(t *testing.T) {
 	}
 }
 
+// The apply path has the same distinction to make as Untrust above, and more
+// riding on it: the hook runs on every prompt, so the wrong answer here is what
+// the user reads all day. "Not trusted" sends them to `sallyport trust`, which
+// cannot fix a directory they need to chmod.
+func TestLoadTrustedConfigSeparatesUnreadableStoreFromNoGrant(t *testing.T) {
+	skipIfRoot(t)
+	path := trustSetup(t)
+	if err := Trust(path); err != nil {
+		t.Fatal(err)
+	}
+	store := storeDir(t)
+	if err := os.Chmod(store, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(store, 0o700) })
+
+	_, _, err := LoadTrustedConfig(path)
+	if err == nil {
+		t.Fatal("expected an error when the grant cannot be read")
+	}
+	if errors.Is(err, ErrUntrusted) {
+		t.Fatalf("unreadable store reported as not trusted: %v", err)
+	}
+	if !errors.Is(err, os.ErrPermission) {
+		t.Errorf("got %v, want the underlying permission error", err)
+	}
+	if !strings.Contains(err.Error(), store) {
+		t.Errorf("got %v, want the failure naming %s", err, store)
+	}
+}
+
 func TestUntrustSurfacesNonPermissionListingFailure(t *testing.T) {
 	path := trustSetup(t)
 	if err := Trust(path); err != nil {

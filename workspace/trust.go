@@ -267,7 +267,19 @@ func LoadTrustedConfig(path string) (Config, string, error) {
 	// Only a regular file is a grant. A directory or a symlink with the right
 	// name would otherwise authorize the config while resisting untrust, which
 	// reads records back.
-	if gi, err := os.Lstat(filepath.Join(dir, fp)); err != nil || !gi.Mode().IsRegular() {
+	//
+	// A store that cannot be read is not a config that was never approved: the
+	// hook says which on every prompt, and "run sallyport trust" is advice that
+	// cannot fix a directory the user has to chmod.
+	switch gi, err := os.Lstat(filepath.Join(dir, fp)); {
+	case err != nil && !os.IsNotExist(err):
+		// Wrapped as an unsafe store rather than returned bare, so the hook
+		// reports the store instead of the config and rolls the workspace back:
+		// a store that cannot be read holds no grant anyone can act on. The
+		// cause is wrapped too, so callers can still tell a permission from an
+		// I/O failure.
+		return Config{}, "", fmt.Errorf("%w: %w", ErrUnsafeTrustStore, err)
+	case err != nil || !gi.Mode().IsRegular():
 		return Config{}, "", ErrUntrusted
 	}
 	// Approval said the path was safe once; the hook runs on every prompt, and
