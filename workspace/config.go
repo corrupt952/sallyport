@@ -66,6 +66,12 @@ func ConfigPath(root string) string { return filepath.Join(root, ConfigFileName)
 // loudly instead of slowing every prompt.
 const maxConfigSize = 1 << 20
 
+// readConfigBytes is a variable so tests can act inside the window between the
+// size check and the read it guards, which is where anything swapped in behind
+// sallyport's back lands: the file growing past the limit, turning into a fifo,
+// or becoming content the path checks never saw.
+var readConfigBytes = os.ReadFile
+
 func readConfigFile(path string) ([]byte, error) {
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -74,7 +80,7 @@ func readConfigFile(path string) ([]byte, error) {
 	if fi.Size() > maxConfigSize {
 		return nil, fmt.Errorf("%s: exceeds %d bytes", path, maxConfigSize)
 	}
-	return os.ReadFile(path)
+	return readConfigBytes(path)
 }
 
 func LoadConfig(path string) (Config, error) {
