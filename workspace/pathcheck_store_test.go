@@ -332,6 +332,12 @@ func TestStoreUnderAStickyWritableDirectoryIsAccepted(t *testing.T) {
 // where a store built from a relative base lands.
 func withUnusableHome(t *testing.T, home string, unset bool) string {
 	t.Helper()
+	// Without a home there is no boundary, so the walk runs to the filesystem
+	// root, and these cases are about where the store is looked for rather than
+	// about the path above it. Leaving the walk on would report whoever owns the
+	// root -- under a Nix builder the sandbox's root, owned by neither the build
+	// user nor root -- in place of the answer under test.
+	t.Setenv(pathCheckOptOut, "1")
 	t.Setenv("HOME", home)
 	if unset {
 		_ = os.Unsetenv("HOME")
