@@ -1,12 +1,30 @@
 package workspace
 
 import (
+	"fmt"
 	"os"
 	"syscall"
 	"testing"
 )
 
-// TestMain gives the package a umask and a home of its own.
+// hookSubcommand is the first argument the zsh hook invokes the binary with.
+// Every argument `go test` passes is a -test.* flag, so a bare word identifies
+// the caller as a shell running the shim.
+const hookSubcommand = "export"
+
+func isHookReentry(args []string) bool {
+	return len(args) > 0 && args[0] == hookSubcommand
+}
+
+// TestMain gives the package a umask and a home of its own, and refuses to run
+// as the sallyport CLI.
+//
+// The refusal: ZshHook embeds os.Executable(), which under `go test` is this
+// test binary, so a shim reaching a real shell has the shell run
+// `workspace.test export ... zsh`. flag.Parse stops at that non-flag argument
+// without complaining and the whole suite runs again, each round starting the
+// next; CommandContext kills the zsh it started but not what that zsh already
+// forked, so the recursion outlives the run as orphans.
 //
 // The umask: t.TempDir creates the directory it returns with
 // os.Mkdir(dir, 0o777), so under the 0002 that Debian and Ubuntu give
@@ -24,6 +42,12 @@ import (
 // own trust store only when it finds none set, and setting one here would make
 // the whole package share a single store.
 func TestMain(m *testing.M) {
+	if isHookReentry(os.Args[1:]) {
+		// stdout is what the hook evals, so it stays empty and the reason goes to
+		// stderr.
+		fmt.Fprintf(os.Stderr, "%s: refusing to run as sallyport; a test let the zsh hook reach the test binary\n", os.Args[0])
+		os.Exit(2)
+	}
 	syscall.Umask(0o022)
 	base, err := os.MkdirTemp("", "sallyport-tests")
 	if err != nil {

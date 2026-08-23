@@ -647,12 +647,18 @@ func TestZshHookRealZshBehavior(t *testing.T) {
 		t.Fatal(err)
 	}
 	// This test exercises the shell mechanics, not the binary, which is not built
-	// here.
+	// here. A substitution matching nothing leaves the shim invoking the test
+	// binary, so fail rather than let zsh run it.
 	lines := strings.Split(shim, "\n")
+	neutered := 0
 	for i, l := range lines {
 		if strings.Contains(l, "eval \"$(") {
 			lines[i] = "  :"
+			neutered++
 		}
+	}
+	if neutered == 0 {
+		t.Fatalf("no eval line to neuter; the shim would invoke the test binary:\n%s", shim)
 	}
 	shim = strings.Join(lines, "\n")
 
@@ -1604,6 +1610,13 @@ printf 'PRECMD=%s\n' "${SALLYPORT_ARGS-<nothing evaled>}"
 	for _, want := range []string{"CHPWD=export zsh", "PRECMD=export -quiet zsh"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("shim output missing %q:\n%s", want, out)
+		}
+		// The same argument vectors TestMain refuses to run for, taken from the
+		// shell's own record, so renaming the subcommand fails here rather than
+		// by forking.
+		_, argv, _ := strings.Cut(want, "=")
+		if args := strings.Fields(argv); !isHookReentry(args) {
+			t.Errorf("TestMain would not recognise %v as the hook re-entering the test binary", args)
 		}
 	}
 }
