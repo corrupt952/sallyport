@@ -68,6 +68,18 @@ func ZshHook() (string, error) {
 	return zshHookFor(self), nil
 }
 
+// BashHook returns the shim for .bashrc. Bash has no chpwd hook, so the shim
+// runs before every interactive prompt through PROMPT_COMMAND. This still
+// observes a cd before the next command is read, as well as trust changes and
+// config edits made without changing directory.
+func BashHook() (string, error) {
+	self, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	return bashHookFor(self), nil
+}
+
 // zshHookFor renders the shim for a given binary path. It is split out from
 // ZshHook so tests can pass hostile paths: os.Executable() cannot be
 // substituted, and under `go test` it is always a tame path.
@@ -113,6 +125,49 @@ fi
 `, stateShellVar, stateEnvKey, zshQuote(self))
 }
 
+// bashHookFor renders a Bash 3.2-compatible shim. Bash has no localtraps
+// option, so the hook records and restores the caller's INT trap explicitly.
+// PROMPT_COMMAND is treated as source text instead of an array because arrays
+// there were not supported by the Bash version shipped with macOS.
+func bashHookFor(self string) string {
+	return fmt.Sprintf(`case "$(declare -p %[1]s 2>/dev/null)" in
+  "declare -x "*)
+    export -n %[1]s
+    %[1]s=''
+    ;;
+  *)
+    : "${%[1]s=}"
+    ;;
+esac
+: "${__sallyport_last_pwd=${PWD-}}"
+_sallyport_hook() {
+  local __sallyport_script __sallyport_int_trap
+  __sallyport_int_trap="$(trap -p INT)"
+  trap '' INT
+  __sallyport_script="$(%[2]s="${%[1]s-}" %[3]s export "$@" bash)" || __sallyport_script=''
+  eval "$__sallyport_script" || :
+  if [[ -n "$__sallyport_int_trap" ]]; then
+    eval "$__sallyport_int_trap"
+  else
+    trap - INT
+  fi
+  return 0
+}
+_sallyport_hook_precmd() {
+  if [[ ${__sallyport_last_pwd-} != "${PWD-}" ]]; then
+    __sallyport_last_pwd="${PWD-}"
+    _sallyport_hook
+  else
+    _sallyport_hook -quiet
+  fi
+}
+case ";${PROMPT_COMMAND-};" in
+  *";_sallyport_hook_precmd;"*) ;;
+  *) PROMPT_COMMAND="_sallyport_hook_precmd${PROMPT_COMMAND:+;$PROMPT_COMMAND}" ;;
+esac
+`, stateShellVar, stateEnvKey, zshQuote(self))
+}
+
 // ExportResult carries warnings as data rather than writing them to a stream,
 // so the CLI decides where they go. An empty Script means no transition was
 // needed.
@@ -125,6 +180,16 @@ type ExportResult struct {
 // script. quiet suppresses the informational warnings for the per-prompt
 // (precmd) calls.
 func BuildExportScript(pwd string, quiet bool) (ExportResult, error) {
+	return BuildExportScriptForShell(pwd, quiet, "zsh")
+}
+
+// BuildExportScriptForShell emits the same environment transition for either
+// supported shell, varying only the syntax that commits the private state from
+// inside the hook function.
+func BuildExportScriptForShell(pwd string, quiet bool, shell string) (ExportResult, error) {
+	if shell != "zsh" && shell != "bash" {
+		return ExportResult{}, fmt.Errorf("unsupported shell %q", shell)
+	}
 	var warnings []string
 
 	st, schemaMismatch, err := decodeState(os.Getenv(stateEnvKey))
@@ -194,19 +259,26 @@ func BuildExportScript(pwd string, quiet bool) (ExportResult, error) {
 		return ExportResult{Warnings: warnings}, nil
 	}
 
-	stateLine := fmt.Sprintf("typeset -g %s=''\n", stateShellVar)
+	stateLine := shellStateLine(shell, "")
 	if root != "" {
 		encoded, err := encodeState(state{Root: root, Fingerprint: fp, Saved: captureSaved(st, vars)})
 		if err != nil {
 			return ExportResult{}, err
 		}
-		// typeset -g, not export: this eval runs inside _sallyport_hook, so a plain
-		// assignment would be scoped to the function, and the state must stay
-		// non-exported (see ZshHook).
-		stateLine = fmt.Sprintf("typeset -g %s=%s\n", stateShellVar, zshQuote(encoded))
+		// The shell-specific assignment is global but not exported: this eval runs
+		// inside _sallyport_hook, while child processes must not inherit the state.
+		stateLine = shellStateLine(shell, encoded)
 	}
 
 	return ExportResult{Script: renderScript(st.Saved, vars, stateLine), Warnings: warnings}, nil
+}
+
+func shellStateLine(shell, encoded string) string {
+	assignment := fmt.Sprintf("%s=%s\n", stateShellVar, zshQuote(encoded))
+	if shell == "zsh" {
+		return "typeset -g " + assignment
+	}
+	return assignment
 }
 
 // captureSaved records, for each variable about to be applied, the value that

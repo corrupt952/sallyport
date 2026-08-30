@@ -16,17 +16,24 @@ type HookCommand struct{}
 func (*HookCommand) Name() string     { return "hook" }
 func (*HookCommand) Synopsis() string { return "Print the shell hook" }
 func (*HookCommand) Usage() string {
-	return "hook zsh: Print the shell hook (add eval \"$(sallyport hook zsh)\" to .zshrc)\n"
+	return "hook <zsh|bash>: Print the shell hook (eval it from the shell's rc file)\n"
 }
 
 func (*HookCommand) SetFlags(f *flag.FlagSet) {}
 
 func (c *HookCommand) Execute(_ context.Context, f *flag.FlagSet, _ ...interface{}) subcommands.ExitStatus {
-	if f.NArg() != 1 || f.Arg(0) != "zsh" {
+	if f.NArg() != 1 || (f.Arg(0) != "zsh" && f.Arg(0) != "bash") {
 		fmt.Fprint(os.Stderr, c.Usage())
 		return subcommands.ExitUsageError
 	}
-	script, err := workspace.ZshHook()
+	var script string
+	var err error
+	switch f.Arg(0) {
+	case "zsh":
+		script, err = workspace.ZshHook()
+	case "bash":
+		script, err = workspace.BashHook()
+	}
 	if err != nil {
 		return fail(err)
 	}

@@ -18,7 +18,7 @@ type ExportCommand struct {
 func (*ExportCommand) Name() string     { return "export" }
 func (*ExportCommand) Synopsis() string { return "Print env diff for the current directory" }
 func (*ExportCommand) Usage() string {
-	return "export [-quiet] zsh: Print env diff for the current directory (used by the hook)\n"
+	return "export [-quiet] <zsh|bash>: Print env diff for the current directory (used by the hook)\n"
 }
 
 func (c *ExportCommand) SetFlags(f *flag.FlagSet) {
@@ -26,7 +26,7 @@ func (c *ExportCommand) SetFlags(f *flag.FlagSet) {
 }
 
 func (c *ExportCommand) Execute(_ context.Context, f *flag.FlagSet, _ ...interface{}) subcommands.ExitStatus {
-	if f.NArg() != 1 || f.Arg(0) != "zsh" {
+	if f.NArg() != 1 || (f.Arg(0) != "zsh" && f.Arg(0) != "bash") {
 		fmt.Fprint(os.Stderr, c.Usage())
 		return subcommands.ExitUsageError
 	}
@@ -34,7 +34,7 @@ func (c *ExportCommand) Execute(_ context.Context, f *flag.FlagSet, _ ...interfa
 	if err != nil {
 		return fail(err)
 	}
-	result, err := workspace.BuildExportScript(pwd, c.quiet)
+	result, err := workspace.BuildExportScriptForShell(pwd, c.quiet, f.Arg(0))
 	if err != nil {
 		return fail(err)
 	}
