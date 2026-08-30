@@ -57,6 +57,9 @@ func stateFromScript(t *testing.T, script string) state {
 	for _, line := range strings.Split(script, "\n") {
 		raw, found := strings.CutPrefix(line, "typeset -g "+stateShellVar+"='")
 		if !found {
+			raw, found = strings.CutPrefix(line, stateShellVar+"='")
+		}
+		if !found {
 			continue
 		}
 		raw = strings.TrimSuffix(raw, "'")
@@ -86,6 +89,15 @@ func setState(t *testing.T, s state) {
 func mustBuild(t *testing.T, pwd string, quiet bool) string {
 	t.Helper()
 	res, err := BuildExportScript(pwd, quiet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res.Script
+}
+
+func mustBuildForShell(t *testing.T, pwd string, quiet bool, shell string) string {
+	t.Helper()
+	res, err := BuildExportScriptForShell(pwd, quiet, shell)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1304,6 +1316,53 @@ printf 'WS_after=%s\n' "${WORKSPACE_PATH-<unset>}"
 	}
 }
 
+// End-to-end: Bash gets the same transition, with its own global state
+// assignment syntax. Keep this compatible with macOS's Bash 3.2.
+func TestExportScriptEvalsInBash(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	t.Setenv(stateEnvKey, "")
+	_ = os.Unsetenv("OP_ACCOUNT")
+	_ = os.Unsetenv("HOGE")
+	_ = os.Unsetenv("WORKSPACE_PATH")
+	root := newWorkspaceDir(t, `{"expand": true, "env": {"OP_ACCOUNT": "acct.example.com", "HOGE": "$HOME/fuga"}}`)
+
+	enter := mustBuildForShell(t, root, false, "bash")
+	if strings.Contains(enter, "typeset -g") {
+		t.Fatalf("bash export contains zsh-only syntax:\n%s", enter)
+	}
+	setState(t, stateFromScript(t, enter))
+	leave := mustBuildForShell(t, t.TempDir(), false, "bash")
+
+	got := exportRunBash(t, bash, t.TempDir(), "HOME=/sallyport-home\n"+enter+`
+printf 'OP=%s\n' "$OP_ACCOUNT"
+printf 'HOGE=%s\n' "$HOGE"
+printf 'WS=%s\n' "$WORKSPACE_PATH"
+`+leave+`
+printf 'OP_after=%s\n' "${OP_ACCOUNT-<unset>}"
+printf 'WS_after=%s\n' "${WORKSPACE_PATH-<unset>}"
+`)
+	for _, want := range []string{
+		"OP=acct.example.com",
+		"HOGE=/sallyport-home/fuga",
+		"WS=" + root,
+		"OP_after=<unset>",
+		"WS_after=<unset>",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("bash output missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestBuildExportScriptRejectsUnsupportedShell(t *testing.T) {
+	if _, err := BuildExportScriptForShell(t.TempDir(), false, "fish"); err == nil {
+		t.Error("unsupported shell was accepted")
+	}
+}
+
 func TestZshQuote(t *testing.T) {
 	cases := map[string]string{
 		"plain":        "'plain'",
@@ -1577,6 +1636,176 @@ func exportRunZshWithEnv(t *testing.T, zsh, dir string, env []string, script str
 		t.Fatalf("zsh run failed: %v\n%s", err, out)
 	}
 	return string(out)
+}
+
+func exportRunBash(t *testing.T, bash, dir, script string) string {
+	t.Helper()
+	return exportRunBashWithEnv(t, bash, dir, nil, script)
+}
+
+func exportRunBashWithEnv(t *testing.T, bash, dir string, env []string, script string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bash, "--noprofile", "--norc", "-c", script)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), env...)
+	cmd.WaitDelay = 5 * time.Second
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("bash never finished:\n%s", out)
+	}
+	if err != nil {
+		t.Fatalf("bash run failed: %v\n%s", err, out)
+	}
+	return string(out)
+}
+
+func TestBashHookRealBashBehavior(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	standin := exportPlantStandin(t, `#!/bin/sh
+for a in "$@"; do last="$a"; done
+if [ "$1" != export ] || [ "$last" != bash ]; then
+  echo "usage: export [-quiet] bash" >&2
+  exit 2
+fi
+printf "export SALLYPORT_ARGS='%s'\n" "$*"
+printf "__sallyport_state='OURS'\n"
+printf 'false\n'
+`)
+	shim := bashHookFor(standin)
+	out := exportRunBash(t, bash, filepath.Dir(standin), `
+PROMPT_COMMAND='printf user-prompt'
+`+shim+shim+`
+trap 'SALLYPORT_USER_TRAP=yes' INT
+set -u
+unset `+stateShellVar+`
+_sallyport_hook
+printf 'STATUS=%s\n' "$?"
+printf 'ARGS=%s\n' "$SALLYPORT_ARGS"
+printf 'STATE=%s\n' "${`+stateShellVar+`-<unset>}"
+printf 'PROMPT=%s\n' "$PROMPT_COMMAND"
+trap -p INT
+printf 'CHILDENV=%s\n' "$(env | grep -c '^`+stateShellVar+`=')"
+_sallyport_hook_precmd
+printf 'UNCHANGED=%s\n' "$SALLYPORT_ARGS"
+mkdir sub
+cd sub
+_sallyport_hook_precmd
+printf 'CHANGED=%s\n' "$SALLYPORT_ARGS"
+`)
+	for _, want := range []string{
+		"STATUS=0",
+		"ARGS=export bash",
+		"STATE=OURS",
+		"PROMPT=_sallyport_hook_precmd;printf user-prompt",
+		"trap -- 'SALLYPORT_USER_TRAP=yes' SIGINT",
+		"CHILDENV=0",
+		"UNCHANGED=export -quiet bash",
+		"CHANGED=export bash",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("bash shim output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Count(out, "_sallyport_hook_precmd") != 1 {
+		t.Errorf("bash shim registered more than once:\n%s", out)
+	}
+}
+
+func TestBashHookRealBashDropsInheritedState(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	standin := exportPlantStandin(t, `#!/bin/sh
+printf "export SALLYPORT_SAW='%s'\n" "${__SALLYPORT_STATE-<absent>}"
+`)
+	shim := bashHookFor(standin)
+	out := exportRunBashWithEnv(t, bash, filepath.Dir(standin),
+		[]string{stateShellVar + "=INJECTED-BY-THE-ENVIRONMENT"}, shim+`
+_sallyport_hook
+printf 'SAW=[%s]\n' "$SALLYPORT_SAW"
+printf 'CHILDENV=[%s]\n' "$(env | grep -c '^`+stateShellVar+`=')"
+`+stateShellVar+`='OURS'
+`+shim+`
+printf 'RESOURCED=[%s]\n' "$`+stateShellVar+`"
+`)
+	for _, want := range []string{"SAW=[]", "CHILDENV=[0]", "RESOURCED=[OURS]"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("bash shim output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestBashHookRealBashRunsBinaryAtHostilePath(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	for _, name := range hostileBinaryPaths {
+		t.Run(name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), name)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			fake := filepath.Join(dir, "sallyport")
+			if err := os.WriteFile(fake, []byte("#!/bin/sh\nprintf 'export SALLYPORT_PROBE=ok\\n'\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			got := exportRunBash(t, bash, dir, bashHookFor(fake)+`
+printf 'HOOKDEF=%s\n' "$(declare -F _sallyport_hook)"
+_sallyport_hook
+printf 'PROBE=%s\n' "${SALLYPORT_PROBE-<unset>}"
+`)
+			if !strings.Contains(got, "_sallyport_hook") {
+				t.Errorf("shim for a binary at %q did not define the hook:\n%s", dir, got)
+			}
+			if !strings.Contains(got, "PROBE=ok") {
+				t.Errorf("hook did not run the binary at %q:\n%s", dir, got)
+			}
+			if _, err := os.Stat(filepath.Join(dir, "OOPS")); err == nil {
+				t.Errorf("the binary path was executed as a command for %q", dir)
+			}
+		})
+	}
+}
+
+func TestBashHookRealBashMasksInterruptAndSucceeds(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	standin := exportPlantStandin(t, `#!/bin/sh
+kill -INT "$SALLYPORT_TEST_BASH_PID"
+sleep 1
+printf 'export SALLYPORT_PROBE=ok\n'
+printf 'false\n'
+`)
+	out := exportRunBash(t, bash, filepath.Dir(standin), `
+export SALLYPORT_TEST_BASH_PID=$$
+`+bashHookFor(standin)+`
+trap 'SALLYPORT_INT_FIRED=yes' INT
+_sallyport_hook
+printf 'STATUS=%s\n' "$?"
+printf 'PROBE=%s\n' "${SALLYPORT_PROBE-<unset>}"
+printf 'INTFIRED=%s\n' "${SALLYPORT_INT_FIRED-no}"
+trap -p INT
+`)
+	for _, want := range []string{
+		"STATUS=0",
+		"PROBE=ok",
+		"INTFIRED=no",
+		"trap -- 'SALLYPORT_INT_FIRED=yes' SIGINT",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("bash shim output missing %q:\n%s", want, out)
+		}
+	}
 }
 
 // The shim must invoke the binary with an argument vector the export subcommand

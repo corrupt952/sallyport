@@ -3,7 +3,7 @@
 [![CI](https://github.com/corrupt952/sallyport/actions/workflows/ci.yaml/badge.svg)](https://github.com/corrupt952/sallyport/actions/workflows/ci.yaml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/corrupt952/sallyport)](https://goreportcard.com/report/github.com/corrupt952/sallyport)
 
-A trust-based, per-directory shell hook for zsh. `sallyport` applies environment variables declared in a `.sallyport.jsonc` file the moment you `cd` into (or below) the directory that owns it, and restores your previous environment the moment you leave — the same idea as `direnv`, but every config must be explicitly trusted before its contents are ever applied.
+A trust-based, per-directory shell hook for zsh and bash. `sallyport` applies environment variables declared in a `.sallyport.jsonc` file the moment you `cd` into (or below) the directory that owns it, and restores your previous environment the moment you leave — the same idea as `direnv`, but every config must be explicitly trusted before its contents are ever applied.
 
 ## Why sallyport?
 
@@ -51,11 +51,17 @@ make build
 
 ## Quick Start
 
-Add the hook to your `.zshrc`:
+Add the hook to your shell's rc file:
 
 ```sh
+# ~/.zshrc
 eval "$(sallyport hook zsh)"
+
+# ~/.bashrc
+eval "$(sallyport hook bash)"
 ```
+
+The bash hook supports Bash 3.2 and later. Bash has no directory-change hook, so sallyport checks the directory through `PROMPT_COMMAND`; changes take effect before the next prompt, including changes made by `trust`, `untrust`, or editing the config in place.
 
 Then, inside any directory you want workspace-scoped environment variables for:
 
@@ -70,7 +76,7 @@ Edit `.sallyport.jsonc`:
 {
   // Environment variables applied while inside this workspace.
   // WORKSPACE_PATH is exported automatically.
-  // Set "expand": true to let zsh expand $VAR etc. in values.
+  // Set "expand": true to let the active shell expand $VAR etc. in values.
   "env": {
     "OP_ACCOUNT": "acct.example.com"
   },
@@ -90,8 +96,8 @@ sallyport trust
 | Command | Description |
 | --- | --- |
 | `sallyport create` | Write a `.sallyport.jsonc` template in the current directory and trust it |
-| `sallyport hook zsh` | Print the zsh integration shim (used in `.zshrc`) |
-| `sallyport export zsh` | Print the env diff for the current directory (invoked by the hook, not usually run by hand) |
+| `sallyport hook <shell>` | Print the integration shim (`zsh` or `bash`) |
+| `sallyport export <shell>` | Print the env diff for the current directory (`zsh` or `bash`; invoked by the hook) |
 | `sallyport trust` | Approve the nearest `.sallyport.jsonc` so its env gets applied |
 | `sallyport untrust` | Revoke approval of the nearest `.sallyport.jsonc` |
 | `sallyport prune` | Remove trust records whose config file no longer exists |
@@ -125,7 +131,7 @@ Set `SALLYPORT_NO_PATH_CHECK=1` to skip the path checks entirely, for a shared t
 ```
 
 - `env` — a map of environment variables to apply while inside the directory. `WORKSPACE_PATH` (the workspace root) is always exported automatically unless you set it explicitly.
-- `expand` (default `false`, strict mode) — values are applied verbatim via single-quoting; safe for any content, no shell expansion. Set to `true` to have zsh expand `$VAR`, `$(...)`, etc. in values at apply time.
+- `expand` (default `false`, strict mode) — values are applied verbatim via single-quoting; safe for any content, no shell expansion. Set to `true` to have the active shell expand `$VAR`, `$(...)`, etc. in values at apply time.
 
 A workspace is any directory whose nearest ancestor (searching upward) has a `.sallyport.jsonc`; every directory below it inherits the same environment until you leave that subtree.
 
@@ -144,9 +150,9 @@ Strict mode applies a value exactly as written: `$HOME` stays `$HOME`, `$(...)` 
 }
 ```
 
-Values are evaluated by zsh as you enter the workspace, exactly as if the `export` line sat in your `.zshrc`: `$(op read ...)` runs on entry (not on every `cd` below the root), and a literal `"` in a value has to be escaped as `\"`.
+Values are evaluated by zsh or bash as you enter the workspace, exactly as if the `export` line sat in your shell's rc file: `$(op read ...)` runs on entry (not on every `cd` below the root), and a literal `"` in a value has to be escaped as `\"`.
 
-In expand mode a value can reference another `env` entry, but only in one direction: the automatic `WORKSPACE_PATH` is exported first and the remaining keys in byte order (`BINX` before `BIN_DIR`, lowercase keys last), so the reference resolves only when the referencing key sorts later. Written the other way round, as in `"BIN": "$TOOLS/bin"`, `$TOOLS` expands to whatever the variable held before the workspace was entered — usually a wrong value and no error, though under `setopt nounset` the eval aborts partway instead, and because the state line is written last nothing is recorded and the error returns on every prompt. `$WORKSPACE_PATH` is exempt only while it stays automatic; set it in `env` yourself and it becomes an ordinary key in that same order.
+In expand mode a value can reference another `env` entry, but only in one direction: the automatic `WORKSPACE_PATH` is exported first and the remaining keys in byte order (`BINX` before `BIN_DIR`, lowercase keys last), so the reference resolves only when the referencing key sorts later. Written the other way round, as in `"BIN": "$TOOLS/bin"`, `$TOOLS` expands to whatever the variable held before the workspace was entered — usually a wrong value and no error, though with zsh `nounset` or bash `set -u` the eval aborts partway instead, and because the state line is written last nothing is recorded and the error returns on every prompt. `$WORKSPACE_PATH` is exempt only while it stays automatic; set it in `env` yourself and it becomes an ordinary key in that same order.
 
 A value that folds in a variable from outside the workspace, like the `PATH` entry above, is applied again by every shell you start inside the workspace: a child shell inherits no state and takes the environment it was born into as its baseline, so the prefix repeats once per nesting level.
 

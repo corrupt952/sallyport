@@ -136,7 +136,7 @@ func TestExitStatusReachesTheProcess(t *testing.T) {
 		{"version succeeds", []string{"version"}, 0},
 		{"trust without a config fails", []string{"trust"}, 1},
 		{"untrust without a config fails", []string{"untrust"}, 1},
-		{"a bad shell name is a usage error", []string{"hook", "bash"}, 2},
+		{"a bad shell name is a usage error", []string{"hook", "fish"}, 2},
 		{"an unknown subcommand is a usage error", []string{"nonesuch"}, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -179,17 +179,25 @@ func TestEverySubcommandIsRegistered(t *testing.T) {
 // to arrive on stdout, whole, with nothing on stderr for the eval to swallow.
 func TestHookWritesTheShimToStdoutOnly(t *testing.T) {
 	t.Parallel()
-	res := run(t, "hook", "zsh")
-	if res.code != 0 {
-		t.Fatalf("exit code = %d, want 0 (stderr: %s)", res.code, res.stderr)
-	}
-	if res.stderr != "" {
-		t.Errorf("hook wrote to stderr, which the eval would not see: %q", res.stderr)
-	}
-	for _, want := range []string{"_sallyport_hook", "chpwd_functions", "precmd_functions", "export"} {
-		if !strings.Contains(res.stdout, want) {
-			t.Errorf("shim is missing %q:\n%s", want, res.stdout)
-		}
+	for shell, markers := range map[string][]string{
+		"zsh":  {"_sallyport_hook", "chpwd_functions", "precmd_functions", "export"},
+		"bash": {"_sallyport_hook", "PROMPT_COMMAND", "export"},
+	} {
+		t.Run(shell, func(t *testing.T) {
+			t.Parallel()
+			res := run(t, "hook", shell)
+			if res.code != 0 {
+				t.Fatalf("exit code = %d, want 0 (stderr: %s)", res.code, res.stderr)
+			}
+			if res.stderr != "" {
+				t.Errorf("hook wrote to stderr, which the eval would not see: %q", res.stderr)
+			}
+			for _, want := range markers {
+				if !strings.Contains(res.stdout, want) {
+					t.Errorf("shim is missing %q:\n%s", want, res.stdout)
+				}
+			}
+		})
 	}
 }
 
@@ -199,15 +207,17 @@ func TestHookWritesTheShimToStdoutOnly(t *testing.T) {
 func TestExportWritesTheScriptToStdoutAndWarningsToStderr(t *testing.T) {
 	t.Parallel()
 	dir, home := trustedWorkspace(t)
-	res := runIn(t, dir, home, "export", "zsh")
-	if res.code != 0 {
-		t.Fatalf("exit code = %d, want 0 (stderr: %s)", res.code, res.stderr)
-	}
-	if !strings.Contains(res.stdout, "OP_ACCOUNT") {
-		t.Errorf("the script did not reach stdout, where the hook evals it:\nstdout: %q\nstderr: %q", res.stdout, res.stderr)
-	}
-	if strings.Contains(res.stderr, "OP_ACCOUNT") {
-		t.Errorf("the script reached stderr, which the eval does not see: %q", res.stderr)
+	for _, shell := range []string{"zsh", "bash"} {
+		res := runIn(t, dir, home, "export", shell)
+		if res.code != 0 {
+			t.Fatalf("%s: exit code = %d, want 0 (stderr: %s)", shell, res.code, res.stderr)
+		}
+		if !strings.Contains(res.stdout, "OP_ACCOUNT") {
+			t.Errorf("%s: the script did not reach stdout, where the hook evals it:\nstdout: %q\nstderr: %q", shell, res.stdout, res.stderr)
+		}
+		if strings.Contains(res.stderr, "OP_ACCOUNT") {
+			t.Errorf("%s: the script reached stderr, which the eval does not see: %q", shell, res.stderr)
+		}
 	}
 
 	// An untrusted workspace warns, and that warning must not be eval'd.
@@ -216,7 +226,7 @@ func TestExportWritesTheScriptToStdoutAndWarningsToStderr(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeWorkspace(t, untrusted)
-	res = runIn(t, untrusted, home, "export", "zsh")
+	res := runIn(t, untrusted, home, "export", "bash")
 	if !strings.Contains(res.stderr, "sallyport:") {
 		t.Errorf("no warning on stderr for an untrusted workspace: %q", res.stderr)
 	}
@@ -288,8 +298,8 @@ func TestUsageGoesToStderr(t *testing.T) {
 		// A command's own usage, and the top-level usage the Commander renders
 		// for a name it does not know -- which is the one no in-process test can
 		// see, since the Commander holds the streams it captured in init().
-		{"a bad argument", []string{"hook", "bash"}},
-		{"a bad argument to the command whose stdout is eval'd", []string{"export", "bash"}},
+		{"a bad argument", []string{"hook", "fish"}},
+		{"a bad argument to the command whose stdout is eval'd", []string{"export", "fish"}},
 		{"an argument to a command that takes none", []string{"create", "extra"}},
 		{"an unknown subcommand", []string{"nonesuch"}},
 	} {
@@ -336,6 +346,37 @@ func TestTheShimLoadsInARealZsh(t *testing.T) {
 	}
 	if err != nil {
 		t.Fatalf("zsh refused the shim: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "READY") {
+		t.Errorf("the shell did not get past the shim:\n%s", out)
+	}
+}
+
+func TestTheShimLoadsInARealBash(t *testing.T) {
+	t.Parallel()
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	dir, home := newHome(t)
+	cmd := exec.CommandContext(ctx, bash, "--noprofile", "--norc")
+	cmd.Dir = dir
+	cmd.Env = append(cleanEnv(), reentryKey+"=1", "HOME="+home)
+	cmd.Stdin = strings.NewReader(`eval "$(` + self + ` hook bash)"` + "\nprintf 'READY\\n'\n")
+	cmd.WaitDelay = 5 * time.Second
+
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("bash never finished:\n%s", out)
+	}
+	if err != nil {
+		t.Fatalf("bash refused the shim: %v\n%s", err, out)
 	}
 	if !strings.Contains(string(out), "READY") {
 		t.Errorf("the shell did not get past the shim:\n%s", out)

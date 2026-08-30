@@ -42,10 +42,15 @@ func TestShellArgValidation(t *testing.T) {
 	}
 	rejected := [][]string{
 		{},               // missing shell name
-		{"bash"},         // unsupported shell
+		{"fish"},         // unsupported shell
 		{"zsh", "extra"}, // too many args
 	}
 	for name, cmd := range cmds {
+		for _, shell := range []string{"zsh", "bash"} {
+			if got := runCommand(t, cmd, shell); got != subcommands.ExitSuccess {
+				t.Errorf("%s %s: got %v, want ExitSuccess", name, shell, got)
+			}
+		}
 		for _, args := range rejected {
 			if got := runCommand(t, cmd, args...); got != subcommands.ExitUsageError {
 				t.Errorf("%s %v: got %v, want ExitUsageError", name, args, got)
