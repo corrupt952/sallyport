@@ -6,5 +6,5 @@ toolchain go1.27.3
 
 require (
 	github.com/google/subcommands v1.2.0
-	github.com/tailscale/hujson v0.0.0-20260302212456-ecc657c15afd
+	github.com/tailscale/hujson v0.0.0-20260727124030-b80ff77dac4f
 )
