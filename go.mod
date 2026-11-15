@@ -2,7 +2,7 @@ module github.com/corrupt952/sallyport
 
 go 1.26.2
 
-toolchain go1.27.3
+toolchain go1.27.4
 
 require (
 	github.com/google/subcommands v1.2.0
