@@ -1,10 +1,10 @@
-# https://goreleaser.com
 version: 2
 
 builds:
-  # command.Version is stamped via a full import-path ldflags target (not
-  # main.Version) — matches the working scheme already used in flake.nix.
-  - ldflags: -s -w -X "github.com/corrupt952/sallyport/command.Version={{.Version}}"
+  - flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X {{ .ModulePath }}/command.Version={{ .Version }}
     goos:
       - linux
       - darwin
@@ -12,4 +12,17 @@ builds:
       - amd64
       - arm64
 
-# Default archive behavior: bundles LICENSE/README alongside the binary.
+changelog:
+  use: github
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: Bug fixes
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: Dependencies
+      regexp: '^.*?chore\(deps\)!?:.+$'
+      order: 2
+    - title: Others
+      order: 999
